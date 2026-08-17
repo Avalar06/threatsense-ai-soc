@@ -6,7 +6,7 @@ export const apiRouter: Router = express.Router();
 
 apiRouter.use(express.json({ limit: "10mb" }));
 
-// Robust generation with automatic model fallback if quota limit is reached
+// Robust generation with automatic model fallback & retry if quota or demand limit is reached
 async function generateWithFallback(params: {
   contents: any;
   config?: any;
@@ -22,17 +22,33 @@ async function generateWithFallback(params: {
       config: params.config,
     });
   } catch (error: any) {
-    if (
-      error.message?.includes("429") ||
-      error.message?.includes("RESOURCE_EXHAUSTED") ||
-      error.message?.includes("quota")
-    ) {
-      console.warn(`[Gemini API] Primary model ${primary} hit rate limit, falling back to ${fallback}`);
-      return await ai.models.generateContent({
-        model: fallback,
-        contents: params.contents,
-        config: params.config,
-      });
+    const errorStr = (error.message || "") + " " + JSON.stringify(error);
+    const isTransientOrQuota =
+      errorStr.includes("429") ||
+      errorStr.includes("503") ||
+      errorStr.includes("RESOURCE_EXHAUSTED") ||
+      errorStr.includes("UNAVAILABLE") ||
+      errorStr.includes("high demand") ||
+      errorStr.includes("quota") ||
+      errorStr.includes("Overloaded");
+
+    if (isTransientOrQuota) {
+      console.warn(`[Gemini API] Primary model ${primary} unavailable/rate-limited, falling back to ${fallback}`);
+      try {
+        return await ai.models.generateContent({
+          model: fallback,
+          contents: params.contents,
+          config: params.config,
+        });
+      } catch (fallbackError: any) {
+        // Short pause and one retry on fallback model
+        await new Promise((r) => setTimeout(r, 1000));
+        return await ai.models.generateContent({
+          model: fallback,
+          contents: params.contents,
+          config: params.config,
+        });
+      }
     }
     throw error;
   }
