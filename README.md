@@ -164,6 +164,7 @@ threatsense-ai-soc/
 │   │   ├── iocExtractor.test.ts    # IOC extraction and defanging unit tests
 │   │   └── logParser.test.ts       # Multi-format log parser unit tests
 │   └── runAllTests.ts            # Master test suite runner
+├── LICENSE                       # MIT License
 ├── server.ts                     # Production Express server
 ├── package.json                  # Dependencies, metadata, and scripts
 ├── package-lock.json             # Locked dependency tree
@@ -188,5 +189,5 @@ threatsense-ai-soc/
 
 ## 9. License
 
-<!-- TODO: Add LICENSE file (e.g. MIT License) to repository root -->
-License information will be specified upon inclusion of a formal `LICENSE` file in the repository root.
+This project is open-source software licensed under the [MIT License](LICENSE).
+See the [LICENSE](LICENSE) file for full copyright and permission notices.
