@@ -50,6 +50,7 @@ Modern Security Operations Center (SOC) analysts face high alert volumes, fragme
 
 - **Frontend:** React 19, TypeScript (Strict Mode), Tailwind CSS v4, Motion, Recharts, Lucide Icons
 - **Backend & API Layer:** Node.js, Express router (`/server/apiRouter.ts`), Vite development proxy middleware (`/server/apiMiddleware.ts`)
+- **Persistence Foundation:** Server-side SQLite persistence (`data/threatsense.db`, excluded from Git; no external database server required)
 - **AI Integration:** `@google/genai` TypeScript SDK (Gemini 3.7 Flash with automated fallback to Gemini 3.1 Flash-Lite)
 - **Pinned Datasets & Framework References:** MITRE ATT&CK Enterprise v14 (pinned repository dataset), NIST SP 800-61 Rev. 2-informed report schema
 
@@ -62,7 +63,7 @@ ThreatSense AI is engineered with strict server-side API key boundaries:
 - **Server-Side API Key Isolation:** The Gemini API key (`GEMINI_API_KEY`) is consumed exclusively within the Node.js/Express backend layer (`server/geminiClient.ts` / `server/apiRouter.ts`).
 - **No Client-Side Key Exposure:** There are **zero** `VITE_` prefixed secret variables. Production client bundles (`dist/`) contain no credentials, API keys, or cloud secrets.
 - **Dynamic On-Demand Initialization:** The backend client uses dynamic proxy instantiation with `dotenv`, loading the API key at request time to support standard Node.js development environments.
-- **Repository Hygiene:** `.env` and `.env.local` files are strictly excluded via `.gitignore`. A sanitized template (`.env.example`) is provided.
+- **Repository Hygiene:** `.env` and `.env.local` files as well as local SQLite database files (`data/*.db`, `data/*.db-*`) are strictly excluded via `.gitignore`. A sanitized template (`.env.example`) is provided.
 - **Untrusted Input Handling:** Raw event logs, syslog lines, and email headers are handled purely as untrusted text data. No uploaded strings or script commands are executed on the host.
 - **Prompt-Injection Mitigation:** Input telemetry is encapsulated within structured JSON data blocks with explicit system instructions prohibiting execution of instructions embedded in raw log messages.
 - **Hardened HTTP Headers:** Express middleware sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `X-XSS-Protection: 1; mode=block`, and `Referrer-Policy: strict-origin-when-cross-origin`.
@@ -73,11 +74,12 @@ ThreatSense AI is engineered with strict server-side API key boundaries:
 
 All components have been validated locally via automated test suites and live API checks:
 
-- **Automated Test Results:** **39 tests passed across 4 test suites (0 failed)**
+- **Automated Test Results:** **5 test suites passed (0 failed)**
   - `tests/unit/logParser.test.ts`: **13 tests passed** (Windows Event logs, Linux Syslog/auth.log, Web access logs, edge cases)
   - `tests/unit/iocExtractor.test.ts`: **9 tests passed** (IPv4, SHA-256, MD5, URLs, domain extraction, safe defanging)
   - `tests/unit/detectionEngine.test.ts`: **11 tests passed** (Brute-force detection, Mimikatz detection, zero false-positives on benign logs, risk score bounds 0–100)
   - `tests/integration/apiEndpoints.test.ts`: **6 tests passed** (Health check, route validation, bad request rejection)
+  - `tests/integration/database.test.ts`: **Database integration passed** (SQLite schema verification, CRUD persistence, relationship preservation, parameterized SQL injection safety)
 - **Dependency Audit:** `npm audit` reports **0 vulnerabilities**.
 - **TypeScript Static Verification:** `npm run lint` (`tsc --noEmit`) passes with **0 errors**.
 - **Production Bundle:** `npm run build` completes successfully.
@@ -140,6 +142,9 @@ threatsense-ai-soc/
 │   ├── architecture.md           # End-to-end data flow and threat model
 │   └── security.md               # Security architecture, headers, and AI safeguards
 ├── server/
+│   ├── db/
+│   │   ├── database.ts           # SQLite database connection & typed repository
+│   │   └── schema.ts             # Tables, indexes, and JSON serialization helpers
 │   ├── apiMiddleware.ts          # Vite dev-server proxy middleware
 │   ├── apiRouter.ts              # Server-side Express API routes & Gemini handlers
 │   └── geminiClient.ts           # Server-side Gemini client with dynamic key resolution

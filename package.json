@@ -15,7 +15,8 @@
     "test:unit": "tsx tests/unit/detectionEngine.test.ts",
     "test:parser": "tsx tests/unit/logParser.test.ts",
     "test:ioc": "tsx tests/unit/iocExtractor.test.ts",
-    "test:api": "tsx tests/integration/apiEndpoints.test.ts"
+    "test:api": "tsx tests/integration/apiEndpoints.test.ts",
+    "test:db": "tsx tests/integration/database.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
