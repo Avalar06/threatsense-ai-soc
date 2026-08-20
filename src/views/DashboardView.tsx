@@ -30,12 +30,18 @@ export const DashboardView: React.FC = () => {
     events,
     alerts,
     iocs,
-    incidentReports,
+    dashboardStats,
+    statsLoading,
+    statsError,
+    alertsLoading,
+    alertsError,
     setActiveTab,
     openInvestigationForAlert,
     updateAlertStatus,
     loadScenario,
     activeScenarioId,
+    loadDashboardStats,
+    loadAlerts,
   } = useSoc();
 
   // Filters
@@ -44,20 +50,21 @@ export const DashboardView: React.FC = () => {
   const [selectedStatus, setSelectedStatus] = useState<string>("ALL");
   const [selectedDetectionSource, setSelectedDetectionSource] = useState<string>("ALL");
 
-  // Metrics
+  // Metrics (prioritizing persistent backend dashboardStats with local fallback)
   const metrics = useMemo(() => {
-    const totalAlerts = alerts.length;
-    const criticalAlerts = alerts.filter((a) => a.severity === "CRITICAL").length;
-    const highAlerts = alerts.filter((a) => a.severity === "HIGH").length;
-    const mediumAlerts = alerts.filter((a) => a.severity === "MEDIUM").length;
+    const totalAlerts = dashboardStats?.totalAlerts ?? alerts.length;
+    const criticalAlerts = dashboardStats?.criticalAlerts ?? alerts.filter((a) => a.severity === "CRITICAL").length;
+    const highAlerts = dashboardStats?.highAlerts ?? alerts.filter((a) => a.severity === "HIGH").length;
+    const mediumAlerts = dashboardStats?.mediumAlerts ?? alerts.filter((a) => a.severity === "MEDIUM").length;
     const detectedAnomalies = events.filter(
       (e) => e.status === "FLAGGED" || e.status === "ANOMALOUS" || e.severity === "CRITICAL"
     ).length;
-    const activeInvestigations = alerts.filter(
-      (a) => a.status === "INVESTIGATING" || a.status === "NEW"
-    ).length;
+    const activeInvestigations = (dashboardStats?.investigatingAlerts ?? 0) + (dashboardStats?.newAlerts ?? 0) ||
+      alerts.filter((a) => a.status === "INVESTIGATING" || a.status === "NEW").length;
     const iocsCount = iocs.length;
-    const incidentsResolved = alerts.filter((a) => a.status === "RESOLVED").length;
+    const incidentsResolved = dashboardStats?.resolvedAlerts ?? alerts.filter((a) => a.status === "RESOLVED").length;
+    const activeHosts = dashboardStats?.activeHosts ?? new Set(alerts.map((a) => a.host).filter(Boolean)).size;
+    const averageRiskScore = dashboardStats?.averageRiskScore ?? (alerts.length > 0 ? Math.round(alerts.reduce((acc, a) => acc + (a.riskScore || 0), 0) / alerts.length) : 0);
 
     return {
       totalAlerts,
@@ -68,8 +75,10 @@ export const DashboardView: React.FC = () => {
       activeInvestigations,
       iocsCount,
       incidentsResolved,
+      activeHosts,
+      averageRiskScore,
     };
-  }, [alerts, events, iocs]);
+  }, [dashboardStats, alerts, events, iocs]);
 
   // Filtered alerts
   const filteredAlerts = useMemo(() => {
@@ -133,6 +142,25 @@ export const DashboardView: React.FC = () => {
           ))}
         </div>
       </div>
+
+      {/* Error Banners */}
+      {(statsError || alertsError) && (
+        <div className="bg-red-950/60 border border-red-800 rounded-xl p-3.5 flex items-center justify-between text-xs text-red-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <span>{statsError || alertsError} (Using cached/fallback values)</span>
+          </div>
+          <button
+            onClick={() => {
+              loadDashboardStats();
+              loadAlerts();
+            }}
+            className="px-2.5 py-1 bg-red-900/60 hover:bg-red-800 border border-red-700 rounded text-red-200 font-mono text-[11px]"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* 8 Top-Level Security KPI Metric Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">

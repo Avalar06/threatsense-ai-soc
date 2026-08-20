@@ -12,6 +12,8 @@ import {
   Layers,
   Zap,
   Terminal,
+  AlertTriangle,
+  RefreshCw,
 } from "lucide-react";
 import { SeverityBadge } from "../components/common/SeverityBadge.js";
 import { RiskScoreMeter } from "../components/common/RiskScoreMeter.js";
@@ -19,13 +21,22 @@ import { MitreTag } from "../components/common/MitreTag.js";
 import { AlertStatus, Severity, DetectionSource } from "../types/soc.js";
 
 export const AlertsView: React.FC = () => {
-  const { alerts, openInvestigationForAlert, updateAlertStatus } = useSoc();
+  const {
+    alerts,
+    alertsLoading,
+    alertsError,
+    loadAlerts,
+    openInvestigationForAlert,
+    updateAlertStatus,
+  } = useSoc();
 
   const [search, setSearch] = useState("");
   const [selectedSeverity, setSelectedSeverity] = useState<string>("ALL");
   const [selectedStatus, setSelectedStatus] = useState<string>("ALL");
   const [selectedSource, setSelectedSource] = useState<string>("ALL");
   const [selectedAlerts, setSelectedAlerts] = useState<string[]>([]);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   // Filter logic
   const filtered = useMemo(() => {
@@ -61,9 +72,26 @@ export const AlertsView: React.FC = () => {
     );
   };
 
-  const handleBulkStatus = (status: AlertStatus) => {
-    selectedAlerts.forEach((id) => updateAlertStatus(id, status));
-    setSelectedAlerts([]);
+  const handleBulkStatus = async (status: AlertStatus) => {
+    setUpdateError(null);
+    try {
+      await Promise.all(selectedAlerts.map((id) => updateAlertStatus(id, status)));
+      setSelectedAlerts([]);
+    } catch (err: any) {
+      setUpdateError(err.message || "Failed to update selected alerts.");
+    }
+  };
+
+  const handleSingleStatusUpdate = async (id: string, status: AlertStatus) => {
+    setUpdatingId(id);
+    setUpdateError(null);
+    try {
+      await updateAlertStatus(id, status);
+    } catch (err: any) {
+      setUpdateError(`Failed to update alert ${id}: ${err.message || "Backend error"}`);
+    } finally {
+      setUpdatingId(null);
+    }
   };
 
   return (
@@ -87,31 +115,62 @@ export const AlertsView: React.FC = () => {
           </p>
         </div>
 
-        {/* Bulk Action Bar */}
-        {selectedAlerts.length > 0 && (
-          <div className="flex items-center gap-2 bg-slate-900 border border-slate-700 p-2 rounded-lg text-xs font-mono">
-            <span className="text-cyan-400 font-bold px-2">{selectedAlerts.length} Selected:</span>
-            <button
-              onClick={() => handleBulkStatus("INVESTIGATING")}
-              className="px-2.5 py-1 bg-cyan-950 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 rounded font-semibold transition-colors"
-            >
-              Mark Investigating
-            </button>
-            <button
-              onClick={() => handleBulkStatus("RESOLVED")}
-              className="px-2.5 py-1 bg-emerald-950 hover:bg-emerald-900 border border-emerald-700 text-emerald-300 rounded font-semibold transition-colors"
-            >
-              Mark Resolved
-            </button>
-            <button
-              onClick={() => handleBulkStatus("FALSE_POSITIVE")}
-              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold transition-colors"
-            >
-              Mark FP
-            </button>
-          </div>
-        )}
+        {/* Action / Refresh Controls */}
+        <div className="flex items-center gap-2.5">
+          <button
+            onClick={() => loadAlerts()}
+            disabled={alertsLoading}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-mono text-slate-300 transition-colors"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${alertsLoading ? "animate-spin text-cyan-400" : ""}`} />
+            <span>Refresh</span>
+          </button>
+
+          {/* Bulk Action Bar */}
+          {selectedAlerts.length > 0 && (
+            <div className="flex items-center gap-2 bg-slate-900 border border-slate-700 p-1.5 rounded-lg text-xs font-mono">
+              <span className="text-cyan-400 font-bold px-1.5">{selectedAlerts.length} Selected:</span>
+              <button
+                onClick={() => handleBulkStatus("INVESTIGATING")}
+                className="px-2 py-1 bg-cyan-950 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 rounded font-semibold transition-colors"
+              >
+                Mark Investigating
+              </button>
+              <button
+                onClick={() => handleBulkStatus("RESOLVED")}
+                className="px-2 py-1 bg-emerald-950 hover:bg-emerald-900 border border-emerald-700 text-emerald-300 rounded font-semibold transition-colors"
+              >
+                Mark Resolved
+              </button>
+              <button
+                onClick={() => handleBulkStatus("FALSE_POSITIVE")}
+                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold transition-colors"
+              >
+                Mark FP
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Error Banners */}
+      {(alertsError || updateError) && (
+        <div className="bg-red-950/60 border border-red-800 rounded-xl p-3.5 flex items-center justify-between text-xs text-red-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <span>{alertsError || updateError}</span>
+          </div>
+          <button
+            onClick={() => {
+              setUpdateError(null);
+              loadAlerts();
+            }}
+            className="px-2.5 py-1 bg-red-900/60 hover:bg-red-800 border border-red-700 rounded text-red-200 font-mono text-[11px]"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
@@ -198,15 +257,25 @@ export const AlertsView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-slate-300">
-              {filtered.length === 0 ? (
+              {alertsLoading && alerts.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="text-center py-12 text-slate-400 font-mono">
+                    <div className="flex flex-col items-center justify-center gap-2">
+                      <RefreshCw className="w-5 h-5 animate-spin text-cyan-400" />
+                      <span>Loading alerts from persistent backend...</span>
+                    </div>
+                  </td>
+                </tr>
+              ) : filtered.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="text-center py-12 text-slate-500 font-mono">
-                    No alerts match the active filter criteria.
+                    No alerts found.
                   </td>
                 </tr>
               ) : (
                 filtered.map((alert) => {
                   const isChecked = selectedAlerts.includes(alert.id);
+                  const isBeingUpdated = updatingId === alert.id;
                   return (
                     <tr
                       key={alert.id}
@@ -228,7 +297,7 @@ export const AlertsView: React.FC = () => {
                       <td className="px-4 py-3 font-mono">
                         <div className="font-bold text-cyan-400">{alert.id}</div>
                         <div className="text-[10px] text-slate-400">
-                          {alert.timestamp.replace("T", " ").replace("Z", "")}
+                          {alert.timestamp ? alert.timestamp.replace("T", " ").replace("Z", "") : ""}
                         </div>
                       </td>
 
@@ -272,9 +341,10 @@ export const AlertsView: React.FC = () => {
                       {/* Status */}
                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                         <select
+                          disabled={isBeingUpdated}
                           value={alert.status}
-                          onChange={(e) => updateAlertStatus(alert.id, e.target.value as AlertStatus)}
-                          className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-cyan-500"
+                          onChange={(e) => handleSingleStatusUpdate(alert.id, e.target.value as AlertStatus)}
+                          className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-[11px] font-mono text-slate-300 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
                         >
                           <option value="NEW">NEW</option>
                           <option value="INVESTIGATING">INVESTIGATING</option>

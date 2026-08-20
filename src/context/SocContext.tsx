@@ -1,10 +1,37 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { Alert, AlertStatus, GeminiInvestigationResult, IncidentReport, IOC, SecurityEvent, TimelineEvent } from "../types/soc.js";
+import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
+import {
+  Alert,
+  AlertStatus,
+  DashboardStats,
+  GeminiInvestigationResult,
+  Incident,
+  IncidentReport,
+  IOC,
+  SecurityEvent,
+  TimelineEvent,
+} from "../types/soc.js";
 import { SAMPLE_SCENARIOS } from "../data/sampleLogs.js";
-import { parseRawLogs } from "../services/logParser.js";
 import { extractIocsFromText } from "../services/iocExtractor.js";
-import { runDetectionEngine, DEFAULT_DETECTION_RULES } from "../services/detectionEngine.js";
-import { checkBackendHealth, investigateAlertWithGemini } from "../services/apiClient.js";
+import {
+  checkBackendHealth,
+  investigateAlertWithGemini,
+  getDashboardStats as apiGetDashboardStats,
+  getAlerts as apiGetAlerts,
+  getLogs as apiGetLogs,
+  getReports as apiGetReports,
+  getIncidents as apiGetIncidents,
+  createAlert as apiCreateAlert,
+  updateAlert as apiUpdateAlert,
+  ingestLogs as apiIngestLogs,
+  createReport as apiCreateReport,
+  createIncident as apiCreateIncident,
+  updateIncident as apiUpdateIncident,
+  AlertFilterParams,
+  LogFilterParams,
+  ReportFilterParams,
+  IncidentFilterParams,
+  ApiError,
+} from "../services/apiClient.js";
 
 export type SocNavTab =
   | "dashboard"
@@ -25,6 +52,21 @@ interface SocContextType {
   alerts: Alert[];
   iocs: IOC[];
   incidentReports: IncidentReport[];
+  incidents: Incident[];
+  dashboardStats: DashboardStats | null;
+  
+  // Loading & Error States
+  statsLoading: boolean;
+  alertsLoading: boolean;
+  logsLoading: boolean;
+  reportsLoading: boolean;
+  incidentsLoading: boolean;
+  isIngesting: boolean;
+  statsError: string | null;
+  alertsError: string | null;
+  logsError: string | null;
+  reportsError: string | null;
+
   activeAlertId: string | null;
   setActiveAlertId: (id: string | null) => void;
   activeAlert: Alert | null;
@@ -32,12 +74,21 @@ interface SocContextType {
   activeScenarioId: string;
   backendHealth: { status: string; geminiKeyConfigured: boolean };
   isInvestigating: boolean;
-  loadScenario: (scenarioId: string) => void;
-  ingestLogs: (rawLogText: string, defaultHost?: string) => void;
+
+  // Actions
+  loadDashboardStats: () => Promise<void>;
+  loadAlerts: (filters?: AlertFilterParams) => Promise<void>;
+  loadLogs: (filters?: LogFilterParams) => Promise<void>;
+  loadReports: (filters?: ReportFilterParams) => Promise<void>;
+  loadIncidents: (filters?: IncidentFilterParams) => Promise<void>;
+  loadScenario: (scenarioId: string) => Promise<void>;
+  ingestLogs: (rawLogText: string, defaultHost?: string) => Promise<{ eventsIngested: number; alertsGenerated: number }>;
   triggerAlertInvestigation: (alertId: string, customNotes?: string) => Promise<GeminiInvestigationResult | null>;
-  updateAlertStatus: (alertId: string, status: AlertStatus) => void;
-  saveIncidentReport: (report: IncidentReport) => void;
-  resetToDefaultDemo: () => void;
+  updateAlertStatus: (alertId: string, status: AlertStatus) => Promise<void>;
+  saveIncidentReport: (report: IncidentReport) => Promise<void>;
+  createIncidentRecord: (incident: Partial<Incident>) => Promise<Incident>;
+  updateIncidentRecord: (id: string, updates: Partial<Incident>) => Promise<void>;
+  resetToDefaultDemo: () => Promise<void>;
   clearAllData: () => void;
   openInvestigationForAlert: (alertId: string) => void;
 }
@@ -50,6 +101,22 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [iocs, setIocs] = useState<IOC[]>([]);
   const [incidentReports, setIncidentReports] = useState<IncidentReport[]>([]);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
+
+  // Status & Error flags
+  const [statsLoading, setStatsLoading] = useState<boolean>(false);
+  const [alertsLoading, setAlertsLoading] = useState<boolean>(false);
+  const [logsLoading, setLogsLoading] = useState<boolean>(false);
+  const [reportsLoading, setReportsLoading] = useState<boolean>(false);
+  const [incidentsLoading, setIncidentsLoading] = useState<boolean>(false);
+  const [isIngesting, setIsIngesting] = useState<boolean>(false);
+
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [logsError, setLogsError] = useState<string | null>(null);
+  const [reportsError, setReportsError] = useState<string | null>(null);
+
   const [activeAlertId, setActiveAlertId] = useState<string | null>(null);
   const [activeScenarioId, setActiveScenarioId] = useState<string>("scenario-apt-multistage");
   const [isInvestigating, setIsInvestigating] = useState<boolean>(false);
@@ -58,57 +125,162 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     geminiKeyConfigured: false,
   });
 
-  // Check health on mount
+  // ----------------------------------------------------
+  // DATA LOADERS
+  // ----------------------------------------------------
+  const loadDashboardStats = useCallback(async () => {
+    setStatsLoading(true);
+    setStatsError(null);
+    try {
+      const data = await apiGetDashboardStats();
+      setDashboardStats(data);
+    } catch (err: any) {
+      setStatsError(err.message || "Failed to load dashboard statistics");
+    } finally {
+      setStatsLoading(false);
+    }
+  }, []);
+
+  const loadAlerts = useCallback(async (filters?: AlertFilterParams) => {
+    setAlertsLoading(true);
+    setAlertsError(null);
+    try {
+      const res = await apiGetAlerts(filters);
+      setAlerts(res.alerts);
+      if (res.alerts.length > 0) {
+        setActiveAlertId((prev) => (prev && res.alerts.some((a) => a.id === prev) ? prev : res.alerts[0].id));
+      }
+    } catch (err: any) {
+      setAlertsError(err.message || "Failed to load alerts");
+    } finally {
+      setAlertsLoading(false);
+    }
+  }, []);
+
+  const loadLogs = useCallback(async (filters?: LogFilterParams) => {
+    setLogsLoading(true);
+    setLogsError(null);
+    try {
+      const res = await apiGetLogs(filters);
+      setEvents(res.events);
+      
+      // Extract IOCs from loaded events
+      const allRaw = res.events.map((e) => `${e.raw} ${e.source_ip} ${e.destination_ip}`).join("\n");
+      const extracted = extractIocsFromText(allRaw);
+      setIocs(extracted);
+    } catch (err: any) {
+      setLogsError(err.message || "Failed to load logs");
+    } finally {
+      setLogsLoading(false);
+    }
+  }, []);
+
+  const loadReports = useCallback(async (filters?: ReportFilterParams) => {
+    setReportsLoading(true);
+    setReportsError(null);
+    try {
+      const res = await apiGetReports(filters);
+      setIncidentReports(res.reports);
+    } catch (err: any) {
+      setReportsError(err.message || "Failed to load incident reports");
+    } finally {
+      setReportsLoading(false);
+    }
+  }, []);
+
+  const loadIncidents = useCallback(async (filters?: IncidentFilterParams) => {
+    setIncidentsLoading(true);
+    try {
+      const res = await apiGetIncidents(filters);
+      setIncidents(res.incidents);
+    } catch (err: any) {
+      console.warn("Failed to load incidents:", err);
+    } finally {
+      setIncidentsLoading(false);
+    }
+  }, []);
+
+  // Ingest logs to backend
+  const ingestLogs = useCallback(
+    async (rawLogText: string, defaultHost = "CORP-ENDPOINT"): Promise<{ eventsIngested: number; alertsGenerated: number }> => {
+      setIsIngesting(true);
+      try {
+        const result = await apiIngestLogs(rawLogText, defaultHost);
+        
+        // Refresh persistent backend state
+        await Promise.all([
+          loadDashboardStats(),
+          loadAlerts(),
+          loadLogs(),
+        ]);
+
+        if (result.alerts && result.alerts.length > 0) {
+          setActiveAlertId(result.alerts[0].id);
+        }
+
+        // Also extract client-side IOC tags for instant search
+        const extractedIocs = extractIocsFromText(rawLogText);
+        setIocs((prev) => {
+          const valSet = new Set(prev.map((i) => i.value));
+          const newOnes = extractedIocs.filter((i) => !valSet.has(i.value));
+          return [...newOnes, ...prev];
+        });
+
+        return {
+          eventsIngested: result.eventsIngested,
+          alertsGenerated: result.alertsGenerated,
+        };
+      } finally {
+        setIsIngesting(false);
+      }
+    },
+    [loadDashboardStats, loadAlerts, loadLogs]
+  );
+
+  const loadScenario = useCallback(
+    async (scenarioId: string) => {
+      const scenario = SAMPLE_SCENARIOS.find((s) => s.id === scenarioId) || SAMPLE_SCENARIOS[0];
+      setActiveScenarioId(scenario.id);
+      await ingestLogs(scenario.rawLog, "FIN-SRV-01");
+    },
+    [ingestLogs]
+  );
+
+  // Initial mount: check health and load all persistent backend data
   useEffect(() => {
     checkBackendHealth().then((res) => {
       setBackendHealth(res);
     });
-  }, []);
 
-  // Load default demo scenario on initial mount
-  useEffect(() => {
-    loadScenario("scenario-apt-multistage");
-  }, []);
+    const initData = async () => {
+      try {
+        const alertsRes = await apiGetAlerts({ limit: 50 });
+        if (alertsRes.alerts.length > 0) {
+          // Persistence already has records, populate from backend
+          setAlerts(alertsRes.alerts);
+          setActiveAlertId(alertsRes.alerts[0].id);
+          await Promise.all([
+            loadDashboardStats(),
+            loadLogs({ limit: 100 }),
+            loadReports(),
+            loadIncidents(),
+          ]);
+        } else {
+          // Fresh database: seed default demo scenario into SQLite persistence
+          await loadScenario("scenario-apt-multistage");
+          await Promise.all([
+            loadReports(),
+            loadIncidents(),
+          ]);
+        }
+      } catch (err) {
+        console.warn("Backend initialization fell back to local scenario:", err);
+        await loadScenario("scenario-apt-multistage");
+      }
+    };
 
-  const loadScenario = (scenarioId: string) => {
-    const scenario = SAMPLE_SCENARIOS.find((s) => s.id === scenarioId) || SAMPLE_SCENARIOS[0];
-    setActiveScenarioId(scenario.id);
-
-    const parsedEvents = parseRawLogs(scenario.rawLog, "FIN-SRV-01");
-    setEvents(parsedEvents);
-
-    // Extract IOCs
-    const extractedIocs = extractIocsFromText(scenario.rawLog);
-    setIocs(extractedIocs);
-
-    // Run Detection Engine
-    const generatedAlerts = runDetectionEngine(parsedEvents, DEFAULT_DETECTION_RULES);
-    setAlerts(generatedAlerts);
-
-    if (generatedAlerts.length > 0) {
-      setActiveAlertId(generatedAlerts[0].id);
-    } else {
-      setActiveAlertId(null);
-    }
-  };
-
-  const ingestLogs = (rawLogText: string, defaultHost = "CORP-ENDPOINT") => {
-    const parsedEvents = parseRawLogs(rawLogText, defaultHost);
-    setEvents((prev) => [...parsedEvents, ...prev]);
-
-    const extractedIocs = extractIocsFromText(rawLogText);
-    setIocs((prev) => {
-      const existingValues = new Set(prev.map((i) => i.value));
-      const newIocs = extractedIocs.filter((i) => !existingValues.has(i.value));
-      return [...newIocs, ...prev];
-    });
-
-    const newAlerts = runDetectionEngine(parsedEvents, DEFAULT_DETECTION_RULES);
-    if (newAlerts.length > 0) {
-      setAlerts((prev) => [...newAlerts, ...prev]);
-      setActiveAlertId(newAlerts[0].id);
-    }
-  };
+    initData();
+  }, [loadDashboardStats, loadLogs, loadReports, loadIncidents, loadScenario]);
 
   const activeAlert = useMemo(() => {
     if (!activeAlertId) return alerts[0] || null;
@@ -119,7 +291,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const activeInvestigationTimeline = useMemo<TimelineEvent[]>(() => {
     if (!activeAlert) return [];
 
-    const related = events.filter((e) => activeAlert.relatedEventIds.includes(e.id));
+    const related = events.filter((e) => activeAlert.relatedEventIds?.includes(e.id));
     const sorted = related.length > 0 ? related : events.slice(0, 10);
 
     return sorted.map((evt, idx) => {
@@ -131,9 +303,9 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       return {
         id: `TL-${idx}-${evt.id}`,
-        time: evt.timestamp.replace("T", " ").replace("Z", ""),
+        time: evt.timestamp ? evt.timestamp.replace("T", " ").replace("Z", "") : new Date().toISOString(),
         stage,
-        title: evt.message.substring(0, 80),
+        title: evt.message ? evt.message.substring(0, 80) : `Security Event ${evt.id}`,
         description: `Host: ${evt.hostname} | User: ${evt.username} | Action: ${evt.action} [${evt.status}]`,
         severity: evt.severity,
         eventId: evt.id,
@@ -152,15 +324,28 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setIsInvestigating(true);
     try {
-      const relatedEvents = events.filter((e) => targetAlert.relatedEventIds.includes(e.id));
+      const relatedEvents = events.filter((e) => targetAlert.relatedEventIds?.includes(e.id));
       const result = await investigateAlertWithGemini(targetAlert, relatedEvents, customNotes);
 
       // Update alert in state with Gemini analysis
+      const updatedNotes = customNotes ? `${targetAlert.notes ? targetAlert.notes + "\n" : ""}${customNotes}` : targetAlert.notes;
+      
+      // Persist status or notes to backend
+      try {
+        await apiUpdateAlert(targetAlert.id, {
+          notes: updatedNotes,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.warn("Failed to persist investigation update to backend:", err);
+      }
+
       setAlerts((prev) =>
         prev.map((a) =>
           a.id === targetAlert.id
             ? {
                 ...a,
+                notes: updatedNotes,
                 geminiAnalysis: result,
                 aiConfidence: result.confidenceScore,
                 updatedAt: new Date().toISOString(),
@@ -169,7 +354,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         )
       );
 
-      // Also merge any new extracted IOCs from Gemini
+      // Merge new extracted IOCs from Gemini
       if (result.extractedIocs && result.extractedIocs.length > 0) {
         const geminiIocs: IOC[] = result.extractedIocs.map((gi) => ({
           id: `IOC-AI-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 5)}`,
@@ -196,24 +381,61 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const updateAlertStatus = (alertId: string, status: AlertStatus) => {
+  const updateAlertStatus = async (alertId: string, status: AlertStatus): Promise<void> => {
+    // 1. Optimistic update
+    const previousAlerts = [...alerts];
     setAlerts((prev) =>
       prev.map((a) => (a.id === alertId ? { ...a, status, updatedAt: new Date().toISOString() } : a))
     );
+
+    try {
+      // 2. Persist to backend
+      const updated = await apiUpdateAlert(alertId, {
+        status,
+        updatedAt: new Date().toISOString(),
+      });
+      
+      // 3. Confirm persisted state
+      setAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...a, ...updated } : a)));
+      
+      // 4. Refresh stats
+      await loadDashboardStats();
+    } catch (err: any) {
+      console.error("Failed to update alert status on backend:", err);
+      // Revert on failure
+      setAlerts(previousAlerts);
+      throw err;
+    }
   };
 
-  const saveIncidentReport = (report: IncidentReport) => {
-    setIncidentReports((prev) => [report, ...prev]);
+  const saveIncidentReport = async (report: IncidentReport): Promise<void> => {
+    try {
+      const persisted = await apiCreateReport(report);
+      setIncidentReports((prev) => [persisted, ...prev.filter((r) => r.id !== persisted.id)]);
+      await loadReports();
+    } catch (err) {
+      console.error("Failed to persist report:", err);
+      setIncidentReports((prev) => [report, ...prev]);
+      throw err;
+    }
   };
 
-  const resetToDefaultDemo = () => {
-    loadScenario("scenario-apt-multistage");
+  const createIncidentRecord = async (incident: Partial<Incident>): Promise<Incident> => {
+    const created = await apiCreateIncident(incident);
+    setIncidents((prev) => [created, ...prev]);
+    return created;
+  };
+
+  const updateIncidentRecord = async (id: string, updates: Partial<Incident>): Promise<void> => {
+    const updated = await apiUpdateIncident(id, updates);
+    setIncidents((prev) => prev.map((inc) => (inc.id === id ? updated : inc)));
+  };
+
+  const resetToDefaultDemo = async () => {
+    await loadScenario("scenario-apt-multistage");
   };
 
   const clearAllData = () => {
-    setEvents([]);
-    setAlerts([]);
-    setIocs([]);
     setActiveAlertId(null);
   };
 
@@ -231,6 +453,18 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         alerts,
         iocs,
         incidentReports,
+        incidents,
+        dashboardStats,
+        statsLoading,
+        alertsLoading,
+        logsLoading,
+        reportsLoading,
+        incidentsLoading,
+        isIngesting,
+        statsError,
+        alertsError,
+        logsError,
+        reportsError,
         activeAlertId,
         setActiveAlertId,
         activeAlert,
@@ -238,11 +472,18 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeScenarioId,
         backendHealth,
         isInvestigating,
+        loadDashboardStats,
+        loadAlerts,
+        loadLogs,
+        loadReports,
+        loadIncidents,
         loadScenario,
         ingestLogs,
         triggerAlertInvestigation,
         updateAlertStatus,
         saveIncidentReport,
+        createIncidentRecord,
+        updateIncidentRecord,
         resetToDefaultDemo,
         clearAllData,
         openInvestigationForAlert,

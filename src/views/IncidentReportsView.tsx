@@ -28,6 +28,9 @@ export const IncidentReportsView: React.FC = () => {
     saveIncidentReport,
     alerts,
     setActiveAlertId,
+    reportsLoading,
+    reportsError,
+    loadReports,
   } = useSoc();
 
   const [generating, setGenerating] = useState(false);
@@ -36,10 +39,19 @@ export const IncidentReportsView: React.FC = () => {
     incidentReports[0] || null
   );
   const [copied, setCopied] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Sync selected report if incidentReports updates
+  React.useEffect(() => {
+    if (!currentReport && incidentReports.length > 0) {
+      setCurrentReport(incidentReports[0]);
+    }
+  }, [incidentReports, currentReport]);
 
   const handleGenerateReport = async () => {
     if (!activeAlert) return;
     setGenerating(true);
+    setSaveError(null);
     try {
       const generated = await generateIncidentReportApi({
         alert: activeAlert,
@@ -91,7 +103,9 @@ export const IncidentReportsView: React.FC = () => {
       };
 
       setCurrentReport(fullReport);
-      saveIncidentReport(fullReport);
+      await saveIncidentReport(fullReport);
+    } catch (err: any) {
+      setSaveError(err.message || "Failed to generate or save incident report");
     } finally {
       setGenerating(false);
     }
@@ -182,8 +196,47 @@ ${currentReport.analystConclusion}
         </div>
       </div>
 
-      {/* Generator Form */}
+      {/* Error Banners */}
+      {(reportsError || saveError) && (
+        <div className="bg-red-950/60 border border-red-800 rounded-xl p-3.5 flex items-center justify-between text-xs text-red-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <span>{reportsError || saveError}</span>
+          </div>
+          <button
+            onClick={() => {
+              setSaveError(null);
+              loadReports();
+            }}
+            className="px-2.5 py-1 bg-red-900/60 hover:bg-red-800 border border-red-700 rounded text-red-200 font-mono text-[11px]"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Generator Form & Saved Reports */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-4">
+        {incidentReports.length > 0 && (
+          <div className="flex items-center gap-2 pb-3 border-b border-slate-800 text-xs font-mono">
+            <span className="text-slate-400">Persisted Saved Reports ({incidentReports.length}):</span>
+            <select
+              value={currentReport?.id || ""}
+              onChange={(e) => {
+                const found = incidentReports.find((r) => r.id === e.target.value);
+                if (found) setCurrentReport(found);
+              }}
+              className="bg-slate-950 border border-slate-700 rounded px-2.5 py-1 text-xs text-cyan-300 focus:outline-none focus:border-cyan-500 font-mono max-w-md truncate"
+            >
+              {incidentReports.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.id} - {r.reportTitle || "Report"} ({r.createdAt ? r.createdAt.substring(0, 10) : ""})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-xs font-mono">
             <span className="text-slate-400">Generate Report for Alert:</span>

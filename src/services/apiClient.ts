@@ -1,5 +1,50 @@
-import { Alert, GeminiInvestigationResult, IncidentReport, PhishingAnalysisResult, SecurityEvent, TimelineEvent, IOC, MitreTechnique } from "../types/soc.js";
+import {
+  Alert,
+  AlertStatus,
+  DashboardStats,
+  GeminiInvestigationResult,
+  Incident,
+  IncidentReport,
+  PhishingAnalysisResult,
+  SecurityEvent,
+  TimelineEvent,
+  IOC,
+  MitreTechnique,
+} from "../types/soc.js";
 
+// Helper for structured API errors
+export class ApiError extends Error {
+  code: string;
+  status: number;
+
+  constructor(message: string, code = "API_ERROR", status = 500) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
+async function handleApiResponse<T>(res: Response): Promise<T> {
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    const text = await res.text();
+    throw new ApiError(`Non-JSON response received (HTTP ${res.status}): ${text.slice(0, 100)}`, "NON_JSON_RESPONSE", res.status);
+  }
+
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    const code = json.error?.code || `HTTP_${res.status}`;
+    const message = json.error?.message || json.error || `Request failed with status ${res.status}`;
+    throw new ApiError(message, code, res.status);
+  }
+
+  return json.data !== undefined ? json.data : json;
+}
+
+// ----------------------------------------------------
+// 1. HEALTH & BACKEND STATUS
+// ----------------------------------------------------
 export async function checkBackendHealth(): Promise<{ status: string; geminiKeyConfigured: boolean }> {
   try {
     const res = await fetch("/api/health");
@@ -8,6 +53,250 @@ export async function checkBackendHealth(): Promise<{ status: string; geminiKeyC
   } catch {
     return { status: "offline", geminiKeyConfigured: false };
   }
+}
+
+// ----------------------------------------------------
+// 2. DASHBOARD STATS
+// ----------------------------------------------------
+export async function getDashboardStats(): Promise<DashboardStats> {
+  const res = await fetch("/api/dashboard/stats");
+  return handleApiResponse<DashboardStats>(res);
+}
+
+// ----------------------------------------------------
+// 3. ALERTS REST API
+// ----------------------------------------------------
+export interface AlertFilterParams {
+  severity?: string;
+  status?: string;
+  priority?: string;
+  host?: string;
+  sourceIp?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function getAlerts(
+  filters?: AlertFilterParams
+): Promise<{ alerts: Alert[]; total: number; limit: number; offset: number }> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.severity && filters.severity !== "ALL") query.set("severity", filters.severity);
+    if (filters.status && filters.status !== "ALL") query.set("status", filters.status);
+    if (filters.priority && filters.priority !== "ALL") query.set("priority", filters.priority);
+    if (filters.host) query.set("host", filters.host);
+    if (filters.sourceIp) query.set("sourceIp", filters.sourceIp);
+    if (filters.search) query.set("search", filters.search);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    if (filters.offset) query.set("offset", String(filters.offset));
+  }
+
+  const url = `/api/alerts${query.toString() ? `?${query.toString()}` : ""}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed to fetch alerts", json.error?.code, res.status);
+  }
+
+  return {
+    alerts: json.data || [],
+    total: json.pagination?.total ?? (json.data?.length || 0),
+    limit: json.pagination?.limit ?? (filters?.limit || 50),
+    offset: json.pagination?.offset ?? (filters?.offset || 0),
+  };
+}
+
+export async function getAlert(id: string): Promise<{ alert: Alert; events: SecurityEvent[] }> {
+  const res = await fetch(`/api/alerts/${encodeURIComponent(id)}`);
+  return handleApiResponse<{ alert: Alert; events: SecurityEvent[] }>(res);
+}
+
+export async function createAlert(alert: Partial<Alert>): Promise<Alert> {
+  const res = await fetch("/api/alerts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(alert),
+  });
+  return handleApiResponse<Alert>(res);
+}
+
+export async function updateAlert(
+  id: string,
+  updates: { status?: AlertStatus; notes?: string; updatedAt?: string }
+): Promise<Alert> {
+  const res = await fetch(`/api/alerts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  return handleApiResponse<Alert>(res);
+}
+
+// ----------------------------------------------------
+// 4. SECURITY EVENTS & LOGS API
+// ----------------------------------------------------
+export interface LogFilterParams {
+  alertId?: string;
+  hostname?: string;
+  sourceIp?: string;
+  eventType?: string;
+  startTime?: string;
+  endTime?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function getLogs(
+  filters?: LogFilterParams
+): Promise<{ events: SecurityEvent[]; total: number; limit: number; offset: number }> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.alertId) query.set("alertId", filters.alertId);
+    if (filters.hostname) query.set("hostname", filters.hostname);
+    if (filters.sourceIp) query.set("sourceIp", filters.sourceIp);
+    if (filters.eventType && filters.eventType !== "ALL") query.set("eventType", filters.eventType);
+    if (filters.startTime) query.set("startTime", filters.startTime);
+    if (filters.endTime) query.set("endTime", filters.endTime);
+    if (filters.search) query.set("search", filters.search);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    if (filters.offset) query.set("offset", String(filters.offset));
+  }
+
+  const url = `/api/logs${query.toString() ? `?${query.toString()}` : ""}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed to fetch logs", json.error?.code, res.status);
+  }
+
+  return {
+    events: json.data || [],
+    total: json.pagination?.total ?? (json.data?.length || 0),
+    limit: json.pagination?.limit ?? (filters?.limit || 50),
+    offset: json.pagination?.offset ?? (filters?.offset || 0),
+  };
+}
+
+export async function ingestLogs(
+  raw: string,
+  source?: string
+): Promise<{ eventsIngested: number; alertsGenerated: number; events: SecurityEvent[]; alerts: Alert[] }> {
+  const res = await fetch("/api/logs/ingest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ raw, source }),
+  });
+  return handleApiResponse<{ eventsIngested: number; alertsGenerated: number; events: SecurityEvent[]; alerts: Alert[] }>(res);
+}
+
+// ----------------------------------------------------
+// 5. INCIDENTS API
+// ----------------------------------------------------
+export interface IncidentFilterParams {
+  status?: string;
+  severity?: string;
+  priority?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function getIncidents(
+  filters?: IncidentFilterParams
+): Promise<{ incidents: Incident[]; total: number; limit: number; offset: number }> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.status && filters.status !== "ALL") query.set("status", filters.status);
+    if (filters.severity && filters.severity !== "ALL") query.set("severity", filters.severity);
+    if (filters.priority && filters.priority !== "ALL") query.set("priority", filters.priority);
+    if (filters.search) query.set("search", filters.search);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    if (filters.offset) query.set("offset", String(filters.offset));
+  }
+
+  const url = `/api/incidents${query.toString() ? `?${query.toString()}` : ""}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed to fetch incidents", json.error?.code, res.status);
+  }
+
+  return {
+    incidents: json.data || [],
+    total: json.pagination?.total ?? (json.data?.length || 0),
+    limit: json.pagination?.limit ?? (filters?.limit || 50),
+    offset: json.pagination?.offset ?? (filters?.offset || 0),
+  };
+}
+
+export async function getIncident(id: string): Promise<Incident> {
+  const res = await fetch(`/api/incidents/${encodeURIComponent(id)}`);
+  return handleApiResponse<Incident>(res);
+}
+
+export async function createIncident(incident: Partial<Incident>): Promise<Incident> {
+  const res = await fetch("/api/incidents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(incident),
+  });
+  return handleApiResponse<Incident>(res);
+}
+
+export async function updateIncident(id: string, updates: Partial<Incident>): Promise<Incident> {
+  const res = await fetch(`/api/incidents/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  return handleApiResponse<Incident>(res);
+}
+
+// ----------------------------------------------------
+// 6. INCIDENT REPORTS API
+// ----------------------------------------------------
+export interface ReportFilterParams {
+  incidentId?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function getReports(
+  filters?: ReportFilterParams
+): Promise<{ reports: IncidentReport[]; total: number; limit: number; offset: number }> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.incidentId) query.set("incidentId", filters.incidentId);
+    if (filters.search) query.set("search", filters.search);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    if (filters.offset) query.set("offset", String(filters.offset));
+  }
+
+  const url = `/api/reports${query.toString() ? `?${query.toString()}` : ""}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed to fetch reports", json.error?.code, res.status);
+  }
+
+  return {
+    reports: json.data || [],
+    total: json.pagination?.total ?? (json.data?.length || 0),
+    limit: json.pagination?.limit ?? (filters?.limit || 50),
+    offset: json.pagination?.offset ?? (filters?.offset || 0),
+  };
+}
+
+export async function createReport(report: Partial<IncidentReport>): Promise<IncidentReport> {
+  const res = await fetch("/api/reports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(report),
+  });
+  return handleApiResponse<IncidentReport>(res);
 }
 
 export async function investigateAlertWithGemini(

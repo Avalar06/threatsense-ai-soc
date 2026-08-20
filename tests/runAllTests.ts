@@ -9,7 +9,8 @@ const tests = [
   "tests/unit/iocExtractor.test.ts",
   "tests/unit/detectionEngine.test.ts",
   "tests/integration/apiEndpoints.test.ts",
-  "tests/integration/database.test.ts"
+  "tests/integration/database.test.ts",
+  "tests/integration/phase3Persistence.test.ts"
 ];
 
 let totalPassed = 0;

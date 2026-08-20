@@ -176,3 +176,38 @@ export interface DetectionRule {
   mitreId: string;
   thresholds: Record<string, number>;
 }
+
+export interface DashboardStats {
+  totalAlerts: number;
+  criticalAlerts: number;
+  highAlerts: number;
+  mediumAlerts: number;
+  lowAlerts: number;
+  infoAlerts: number;
+  newAlerts: number;
+  investigatingAlerts: number;
+  resolvedAlerts: number;
+  closedAlerts: number;
+  activeHosts: number;
+  averageRiskScore: number;
+  alertsBySeverity?: Record<string, number>;
+  alertsByStatus?: Record<string, number>;
+}
+
+export type IncidentStatus = "NEW" | "OPEN" | "INVESTIGATING" | "CONTAINED" | "RESOLVED" | "CLOSED";
+
+export interface Incident {
+  id: string;
+  title: string;
+  severity: Severity;
+  status: IncidentStatus;
+  leadAnalyst?: string;
+  assignedTo?: string;
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string;
+  alertIds?: string[];
+  summary?: string;
+  scope?: string;
+  tags?: string[];
+}

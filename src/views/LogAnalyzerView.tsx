@@ -22,7 +22,18 @@ import { SAMPLE_SCENARIOS } from "../data/sampleLogs.js";
 import { SecurityEvent } from "../types/soc.js";
 
 export const LogAnalyzerView: React.FC = () => {
-  const { events, ingestLogs, loadScenario, setActiveTab, openInvestigationForAlert, alerts } = useSoc();
+  const {
+    events,
+    ingestLogs,
+    loadScenario,
+    setActiveTab,
+    openInvestigationForAlert,
+    alerts,
+    isIngesting,
+    logsLoading,
+    logsError,
+    loadLogs,
+  } = useSoc();
 
   const [rawText, setRawText] = useState("");
   const [selectedHost, setSelectedHost] = useState("FIN-SRV-01");
@@ -32,12 +43,20 @@ export const LogAnalyzerView: React.FC = () => {
   const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null);
   const [copiedRaw, setCopiedRaw] = useState(false);
   const [ingestionMessage, setIngestionMessage] = useState<string | null>(null);
+  const [ingestionError, setIngestionError] = useState<string | null>(null);
 
-  const handleIngest = () => {
+  const handleIngest = async () => {
     if (!rawText.trim()) return;
-    ingestLogs(rawText, selectedHost);
-    setIngestionMessage(`Successfully parsed & ingested events into memory.`);
-    setTimeout(() => setIngestionMessage(null), 4000);
+    setIngestionError(null);
+    try {
+      const res = await ingestLogs(rawText, selectedHost);
+      setIngestionMessage(
+        `Persisted & ingested ${res.eventsIngested} security events into SQLite database (${res.alertsGenerated} alerts triggered).`
+      );
+      setTimeout(() => setIngestionMessage(null), 5000);
+    } catch (err: any) {
+      setIngestionError(err.message || "Failed to ingest logs to backend");
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -45,13 +64,21 @@ export const LogAnalyzerView: React.FC = () => {
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       const content = evt.target?.result as string;
       if (content) {
         setRawText(content);
-        ingestLogs(content, file.name.replace(/\.[^/.]+$/, ""));
-        setIngestionMessage(`Uploaded and parsed '${file.name}' successfully.`);
-        setTimeout(() => setIngestionMessage(null), 4000);
+        setIngestionError(null);
+        try {
+          const hostName = file.name.replace(/\.[^/.]+$/, "");
+          const res = await ingestLogs(content, hostName);
+          setIngestionMessage(
+            `Uploaded & persisted ${res.eventsIngested} events from '${file.name}' (${res.alertsGenerated} alerts).`
+          );
+          setTimeout(() => setIngestionMessage(null), 5000);
+        } catch (err: any) {
+          setIngestionError(err.message || `Failed to process '${file.name}'`);
+        }
       }
     };
     reader.readAsText(file);
@@ -173,10 +200,11 @@ export const LogAnalyzerView: React.FC = () => {
               <button
                 type="button"
                 onClick={handleIngest}
-                className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-xs shadow-md flex items-center gap-1.5 transition-all"
+                disabled={isIngesting}
+                className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-xs shadow-md flex items-center gap-1.5 transition-all disabled:opacity-50"
               >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>Parse & Run Detection Engine</span>
+                <Play className={`w-3.5 h-3.5 fill-current ${isIngesting ? "animate-spin" : ""}`} />
+                <span>{isIngesting ? "Ingesting & Detecting..." : "Parse & Run Detection Engine"}</span>
               </button>
             </div>
           </div>
@@ -185,6 +213,13 @@ export const LogAnalyzerView: React.FC = () => {
             <div className="p-2.5 rounded-lg bg-emerald-950/70 border border-emerald-500/50 text-emerald-300 text-xs font-mono flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>{ingestionMessage}</span>
+            </div>
+          )}
+
+          {ingestionError && (
+            <div className="p-2.5 rounded-lg bg-red-950/70 border border-red-500/50 text-red-300 text-xs font-mono flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <span>{ingestionError}</span>
             </div>
           )}
         </div>
