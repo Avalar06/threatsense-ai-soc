@@ -29,6 +29,17 @@ app.use((_req, res, next) => {
 // Mount API router
 app.use("/api", apiRouter);
 
+// Catch-all 404 for unhandled /api requests
+app.use("/api", (_req, res) => {
+  res.status(404).json({
+    success: false,
+    error: {
+      code: "NOT_FOUND",
+      message: "API endpoint not found",
+    },
+  });
+});
+
 // Serve static assets from dist
 app.use(express.static(path.join(__dirname, "dist")));
 

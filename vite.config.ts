@@ -14,7 +14,29 @@ function apiServerPlugin(): Plugin {
       const apiApp = createDevApiApp();
       server.middlewares.use((req, res, next) => {
         if (req.url?.startsWith('/api')) {
-          apiApp(req as any, res as any, next);
+          apiApp(req as any, res as any, (err?: any) => {
+            if (err) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({
+                success: false,
+                error: {
+                  code: 'INTERNAL_ERROR',
+                  message: err?.message || 'Internal server error',
+                },
+              }));
+            } else {
+              res.statusCode = 404;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({
+                success: false,
+                error: {
+                  code: 'NOT_FOUND',
+                  message: 'API endpoint not found',
+                },
+              }));
+            }
+          });
         } else {
           next();
         }

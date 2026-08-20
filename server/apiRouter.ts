@@ -1,10 +1,37 @@
 import express, { Request, Response, Router } from "express";
 import { ai } from "./geminiClient.js";
 import { Type } from "@google/genai";
+import { SocDatabase } from "./db/database.js";
+import { parseRawLogs } from "../src/services/logParser.js";
+import { runDetectionEngine } from "../src/services/detectionEngine.js";
+import type { Alert, SecurityEvent, IncidentReport } from "../src/types/soc.js";
 
 export const apiRouter: Router = express.Router();
 
 apiRouter.use(express.json({ limit: "10mb" }));
+
+let dbInstance: SocDatabase | null = null;
+
+export function getSocDatabase(): SocDatabase {
+  if (!dbInstance) {
+    dbInstance = new SocDatabase();
+  }
+  return dbInstance;
+}
+
+export function setSocDatabase(db: SocDatabase | null) {
+  dbInstance = db;
+}
+
+function sendError(res: Response, status: number, code: string, message: string) {
+  return res.status(status).json({
+    success: false,
+    error: {
+      code,
+      message,
+    },
+  });
+}
 
 // Robust generation with automatic model fallback & retry if quota or demand limit is reached
 async function generateWithFallback(params: {
@@ -602,6 +629,497 @@ ${JSON.stringify(iocs.slice(0, 20), null, 2)}`;
   } catch (error: any) {
     console.error("Error in /api/ioc-enrich:", error);
     return res.status(500).json({ error: error.message || "IOC enrichment failed" });
+  }
+});
+
+// ==========================================
+// PHASE 2: ALERTS REST API
+// ==========================================
+
+// GET /api/alerts - List alerts with filters & pagination
+apiRouter.get("/alerts", (req: Request, res: Response) => {
+  try {
+    const { severity, status, priority, search, host, sourceIp, limit, offset } = req.query;
+    const result = getSocDatabase().listAlerts({
+      severity: typeof severity === "string" ? severity : undefined,
+      status: typeof status === "string" ? status : undefined,
+      priority: typeof priority === "string" ? priority : undefined,
+      search: typeof search === "string" ? search : undefined,
+      host: typeof host === "string" ? host : undefined,
+      sourceIp: typeof sourceIp === "string" ? sourceIp : undefined,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+    return res.json({
+      success: true,
+      data: result.alerts,
+      pagination: {
+        limit: result.limit,
+        offset: result.offset,
+        total: result.total,
+      },
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve alerts");
+  }
+});
+
+// GET /api/alerts/:id - Retrieve alert and associated security events
+apiRouter.get("/alerts/:id", (req: Request, res: Response) => {
+  try {
+    const alert = getSocDatabase().getAlertById(req.params.id);
+    if (!alert) {
+      return sendError(res, 404, "NOT_FOUND", `Alert with ID '${req.params.id}' was not found`);
+    }
+    const events = getSocDatabase().getEventsByAlertId(req.params.id);
+    return res.json({
+      success: true,
+      data: {
+        alert,
+        events,
+      },
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve alert");
+  }
+});
+
+// POST /api/alerts - Create alert with validation and conflict detection
+apiRouter.post("/alerts", (req: Request, res: Response) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a valid JSON object");
+    }
+
+    const { id, title, severity, status, riskScore } = body;
+    if (!id || typeof id !== "string" || !id.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: id (non-empty string)");
+    }
+    if (!title || typeof title !== "string" || !title.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: title (non-empty string)");
+    }
+    if (!severity || typeof severity !== "string") {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: severity");
+    }
+    if (!status || typeof status !== "string") {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: status");
+    }
+    if (typeof riskScore !== "number" || isNaN(riskScore)) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: riskScore (number 0-100)");
+    }
+
+    if (getSocDatabase().existsAlert(id)) {
+      return sendError(res, 409, "CONFLICT", `Alert with ID '${id}' already exists`);
+    }
+
+    const alert: Alert = {
+      id,
+      title,
+      severity: severity as Alert["severity"],
+      riskScore,
+      status: status as Alert["status"],
+      host: body.host || "UNKNOWN_HOST",
+      sourceIp: body.sourceIp || "0.0.0.0",
+      destinationIp: body.destinationIp,
+      username: body.username || "UNKNOWN_USER",
+      detectionSource: body.detectionSource || "RULE_BASED",
+      ruleId: body.ruleId,
+      ruleName: body.ruleName,
+      detectionConfidence: body.detectionConfidence ?? 100,
+      aiConfidence: body.aiConfidence,
+      description: body.description || "",
+      evidence: Array.isArray(body.evidence) ? body.evidence : [],
+      relatedEventIds: Array.isArray(body.relatedEventIds) ? body.relatedEventIds : [],
+      mitreTechniques: Array.isArray(body.mitreTechniques) ? body.mitreTechniques : [],
+      notes: body.notes || body.analystNotes,
+      geminiAnalysis: body.geminiAnalysis,
+      timestamp: body.createdAt || body.timestamp || new Date().toISOString(),
+      updatedAt: body.updatedAt || new Date().toISOString(),
+    };
+
+    getSocDatabase().insertAlert(alert);
+    return res.status(201).json({
+      success: true,
+      data: alert,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to create alert");
+  }
+});
+
+// PATCH /api/alerts/:id - Update analyst-controlled fields
+apiRouter.patch("/alerts/:id", (req: Request, res: Response) => {
+  try {
+    const existing = getSocDatabase().getAlertById(req.params.id);
+    if (!existing) {
+      return sendError(res, 404, "NOT_FOUND", `Alert with ID '${req.params.id}' was not found`);
+    }
+
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a valid JSON object");
+    }
+
+    const updates: Partial<Alert> = {};
+    if (body.status !== undefined) {
+      if (typeof body.status !== "string") {
+        return sendError(res, 400, "INVALID_REQUEST", "status must be a string");
+      }
+      updates.status = body.status;
+    }
+    if (body.notes !== undefined || body.analystNotes !== undefined) {
+      updates.notes = body.notes !== undefined ? String(body.notes) : String(body.analystNotes);
+    }
+    if (body.updatedAt !== undefined) {
+      updates.updatedAt = String(body.updatedAt);
+    }
+
+    getSocDatabase().updateAlert(req.params.id, updates);
+    const updated = getSocDatabase().getAlertById(req.params.id);
+    return res.json({
+      success: true,
+      data: updated,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to update alert");
+  }
+});
+
+// ==========================================
+// PHASE 2: LOGS & SECURITY EVENTS API
+// ==========================================
+
+// GET /api/logs - List security events with filters & pagination
+apiRouter.get("/logs", (req: Request, res: Response) => {
+  try {
+    const { alertId, hostname, sourceIp, eventType, startTime, endTime, search, limit, offset } = req.query;
+    const result = getSocDatabase().listSecurityEvents({
+      alertId: typeof alertId === "string" ? alertId : undefined,
+      hostname: typeof hostname === "string" ? hostname : undefined,
+      sourceIp: typeof sourceIp === "string" ? sourceIp : undefined,
+      eventType: typeof eventType === "string" ? eventType : undefined,
+      startTime: typeof startTime === "string" ? startTime : undefined,
+      endTime: typeof endTime === "string" ? endTime : undefined,
+      search: typeof search === "string" ? search : undefined,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+    return res.json({
+      success: true,
+      data: result.events,
+      pagination: {
+        limit: result.limit,
+        offset: result.offset,
+        total: result.total,
+      },
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve security events");
+  }
+});
+
+// POST /api/logs/ingest - Server-side log ingestion pipeline (Parse -> Detect -> Persist -> Correlate)
+apiRouter.post("/logs/ingest", (req: Request, res: Response) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a JSON object");
+    }
+
+    const { raw, source } = body;
+    if (typeof raw !== "string" || !raw.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Field 'raw' must be a non-empty string");
+    }
+
+    // Input length protection (5MB maximum raw payload)
+    if (raw.length > 5_000_000) {
+      return sendError(res, 400, "PAYLOAD_TOO_LARGE", "Raw log payload exceeds maximum allowed size (5MB)");
+    }
+
+    // 1. Normalize raw logs via existing deterministic parser
+    const defaultHost = typeof source === "string" && source.trim() ? source.trim() : "INGESTED-ENDPOINT";
+    const events = parseRawLogs(raw, defaultHost);
+
+    if (events.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          eventsIngested: 0,
+          alertsGenerated: 0,
+          events: [],
+          alerts: [],
+        },
+      });
+    }
+
+    // 2. Execute deterministic detection engine against normalized events
+    const alerts = runDetectionEngine(events);
+
+    // 3. Persist normalized events
+    getSocDatabase().insertEventsBatch(events);
+
+    // 4. Persist generated alerts and update correlated event links
+    for (const alert of alerts) {
+      getSocDatabase().insertAlert(alert);
+      if (Array.isArray(alert.relatedEventIds)) {
+        for (const evtId of alert.relatedEventIds) {
+          getSocDatabase().updateEventAlertId(evtId, alert.id);
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        eventsIngested: events.length,
+        alertsGenerated: alerts.length,
+        events,
+        alerts,
+      },
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to ingest logs");
+  }
+});
+
+// ==========================================
+// PHASE 2: DASHBOARD METRICS API
+// ==========================================
+
+// GET /api/dashboard/stats - Aggregated stats from SQLite persistence
+apiRouter.get("/dashboard/stats", (_req: Request, res: Response) => {
+  try {
+    const stats = getSocDatabase().getDashboardStats();
+    return res.json({
+      success: true,
+      data: stats,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to calculate dashboard statistics");
+  }
+});
+
+// ==========================================
+// PHASE 2: INCIDENT REPORTS API
+// ==========================================
+
+// GET /api/reports - List incident reports with optional filtering
+apiRouter.get("/reports", (req: Request, res: Response) => {
+  try {
+    const { incidentId, search, limit, offset } = req.query;
+    const result = getSocDatabase().listReports({
+      incidentId: typeof incidentId === "string" ? incidentId : undefined,
+      search: typeof search === "string" ? search : undefined,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+    return res.json({
+      success: true,
+      data: result.reports,
+      pagination: {
+        limit: result.limit,
+        offset: result.offset,
+        total: result.total,
+      },
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve incident reports");
+  }
+});
+
+// POST /api/reports - Persist structured incident report
+apiRouter.post("/reports", (req: Request, res: Response) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a JSON object");
+    }
+
+    const reportTitle = body.reportTitle || body.title;
+    const author = body.author;
+    if (!reportTitle || typeof reportTitle !== "string" || !reportTitle.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: reportTitle");
+    }
+    if (!author || typeof author !== "string" || !author.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: author");
+    }
+
+    const id = body.id || `RPT-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`;
+
+    const report: IncidentReport = {
+      id,
+      incidentId: body.incidentId || "INC-GENERIC",
+      reportTitle: reportTitle.trim(),
+      author: author.trim(),
+      status: body.status || "DRAFT",
+      classification: body.classification || "INTERNAL",
+      executiveSummary: body.executiveSummary || "",
+      incidentDescription: body.incidentDescription || body.description || "",
+      detectionMethod: body.detectionMethod || "RULE_BASED",
+      affectedAssets: Array.isArray(body.affectedAssets) ? body.affectedAssets : [],
+      affectedUsers: Array.isArray(body.affectedUsers) ? body.affectedUsers : [],
+      timeline: Array.isArray(body.timeline) ? body.timeline : [],
+      iocs: Array.isArray(body.iocs) ? body.iocs : [],
+      evidence: Array.isArray(body.evidence) ? body.evidence : [],
+      mitreMappings: Array.isArray(body.mitreMappings) ? body.mitreMappings : [],
+      riskAssessment: body.riskAssessment || {
+        quantitativeScore: 50,
+        impactRating: "MEDIUM",
+      },
+      rootCauseAnalysis: body.rootCauseAnalysis || "",
+      containmentActionsCompleted: Array.isArray(body.containmentActionsCompleted)
+        ? body.containmentActionsCompleted
+        : [],
+      eradicationAndRemediation: Array.isArray(body.eradicationAndRemediation)
+        ? body.eradicationAndRemediation
+        : [],
+      lessonsLearnedAndPreventativeControls: Array.isArray(body.lessonsLearnedAndPreventativeControls)
+        ? body.lessonsLearnedAndPreventativeControls
+        : [],
+      analystConclusion: body.analystConclusion || "",
+      createdAt: body.createdAt || new Date().toISOString(),
+      generatedAt: body.generatedAt || new Date().toISOString(),
+    };
+
+    getSocDatabase().insertReport(report);
+    return res.status(201).json({
+      success: true,
+      data: report,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to persist incident report");
+  }
+});
+
+// ==========================================
+// PHASE 2: INCIDENTS REST API FOUNDATION
+// ==========================================
+
+// GET /api/incidents - List incidents with status/severity filters
+apiRouter.get("/incidents", (req: Request, res: Response) => {
+  try {
+    const { status, severity, priority, search, limit, offset } = req.query;
+    const result = getSocDatabase().listIncidents({
+      status: typeof status === "string" ? status : undefined,
+      severity: typeof severity === "string" ? severity : undefined,
+      priority: typeof priority === "string" ? priority : undefined,
+      search: typeof search === "string" ? search : undefined,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+    return res.json({
+      success: true,
+      data: result.incidents,
+      pagination: {
+        limit: result.limit,
+        offset: result.offset,
+        total: result.total,
+      },
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve incidents");
+  }
+});
+
+// GET /api/incidents/:id - Retrieve incident by ID
+apiRouter.get("/incidents/:id", (req: Request, res: Response) => {
+  try {
+    const incident = getSocDatabase().getIncidentById(req.params.id);
+    if (!incident) {
+      return sendError(res, 404, "NOT_FOUND", `Incident with ID '${req.params.id}' was not found`);
+    }
+    return res.json({
+      success: true,
+      data: incident,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve incident");
+  }
+});
+
+// POST /api/incidents - Create incident record
+apiRouter.post("/incidents", (req: Request, res: Response) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a JSON object");
+    }
+
+    const { title, severity, status } = body;
+    if (!title || typeof title !== "string" || !title.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: title");
+    }
+    if (!severity || typeof severity !== "string") {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: severity");
+    }
+    if (!status || typeof status !== "string") {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: status");
+    }
+
+    const id = body.id || `INC-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`;
+
+    if (getSocDatabase().existsIncident(id)) {
+      return sendError(res, 409, "CONFLICT", `Incident with ID '${id}' already exists`);
+    }
+
+    const now = new Date().toISOString();
+    const incident = {
+      id,
+      title: title.trim(),
+      severity,
+      status,
+      priority: body.priority || "P2",
+      leadAnalyst: body.leadAnalyst,
+      alertIds: Array.isArray(body.alertIds) ? body.alertIds : [],
+      executiveSummary: body.executiveSummary || "",
+      containmentActions: Array.isArray(body.containmentActions) ? body.containmentActions : [],
+      createdAt: body.createdAt || now,
+      updatedAt: body.updatedAt || now,
+      closedAt: body.closedAt,
+    };
+
+    getSocDatabase().insertIncident(incident);
+    return res.status(201).json({
+      success: true,
+      data: incident,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to create incident");
+  }
+});
+
+// PATCH /api/incidents/:id - Update incident lifecycle fields
+apiRouter.patch("/incidents/:id", (req: Request, res: Response) => {
+  try {
+    const existing = getSocDatabase().getIncidentById(req.params.id);
+    if (!existing) {
+      return sendError(res, 404, "NOT_FOUND", `Incident with ID '${req.params.id}' was not found`);
+    }
+
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a JSON object");
+    }
+
+    const updates: Partial<typeof existing> = {};
+    if (body.status !== undefined) updates.status = String(body.status);
+    if (body.priority !== undefined) updates.priority = String(body.priority);
+    if (body.leadAnalyst !== undefined) updates.leadAnalyst = String(body.leadAnalyst);
+    if (body.executiveSummary !== undefined) updates.executiveSummary = String(body.executiveSummary);
+    if (Array.isArray(body.containmentActions)) updates.containmentActions = body.containmentActions;
+    if (Array.isArray(body.alertIds)) updates.alertIds = body.alertIds;
+    if (body.closedAt !== undefined) updates.closedAt = String(body.closedAt);
+    if (body.updatedAt !== undefined) updates.updatedAt = String(body.updatedAt);
+
+    getSocDatabase().updateIncident(req.params.id, updates);
+    const updated = getSocDatabase().getIncidentById(req.params.id);
+    return res.json({
+      success: true,
+      data: updated,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to update incident");
   }
 });
 

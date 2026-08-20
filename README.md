@@ -74,12 +74,12 @@ ThreatSense AI is engineered with strict server-side API key boundaries:
 
 All components have been validated locally via automated test suites and live API checks:
 
-- **Automated Test Results:** **5 test suites passed (0 failed)**
+- **Automated Test Results:** **152 tests passed across 5 test suites (0 failed)**
   - `tests/unit/logParser.test.ts`: **13 tests passed** (Windows Event logs, Linux Syslog/auth.log, Web access logs, edge cases)
   - `tests/unit/iocExtractor.test.ts`: **9 tests passed** (IPv4, SHA-256, MD5, URLs, domain extraction, safe defanging)
   - `tests/unit/detectionEngine.test.ts`: **11 tests passed** (Brute-force detection, Mimikatz detection, zero false-positives on benign logs, risk score bounds 0–100)
-  - `tests/integration/apiEndpoints.test.ts`: **6 tests passed** (Health check, route validation, bad request rejection)
-  - `tests/integration/database.test.ts`: **Database integration passed** (SQLite schema verification, CRUD persistence, relationship preservation, parameterized SQL injection safety)
+  - `tests/integration/apiEndpoints.test.ts`: **70 tests passed** (Alerts REST CRUD & filters, Security event querying, server-side log ingestion pipeline, dashboard stats aggregation, incident & report endpoints, injection safety)
+  - `tests/integration/database.test.ts`: **49 tests passed** (SQLite schema verification, CRUD persistence, relationship preservation, parameterized SQL injection safety)
 - **Dependency Audit:** `npm audit` reports **0 vulnerabilities**.
 - **TypeScript Static Verification:** `npm run lint` (`tsc --noEmit`) passes with **0 errors**.
 - **Production Bundle:** `npm run build` completes successfully.
