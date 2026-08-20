@@ -210,7 +210,7 @@ export class SocDatabase {
       safeJsonStringify(alert.evidence ?? []),
       safeJsonStringify(alert.relatedEventIds ?? []),
       safeJsonStringify(alert.mitreTechniques ?? []),
-      null, // assigned_to
+      alert.assignedTo ?? null,
       alert.notes ?? null,
       safeJsonStringify(alert.geminiAnalysis ?? null),
       alert.timestamp || now,
@@ -319,6 +319,7 @@ export class SocDatabase {
         evidence = ?,
         related_event_ids = ?,
         mitre_techniques = ?,
+        assigned_to = ?,
         analyst_notes = ?,
         gemini_analysis = ?,
         updated_at = ?
@@ -343,6 +344,7 @@ export class SocDatabase {
       safeJsonStringify(merged.evidence),
       safeJsonStringify(merged.relatedEventIds),
       safeJsonStringify(merged.mitreTechniques),
+      merged.assignedTo ?? null,
       merged.notes ?? null,
       safeJsonStringify(merged.geminiAnalysis ?? null),
       merged.updatedAt,
@@ -856,6 +858,7 @@ export class SocDatabase {
       evidence: safeJsonParse<string[]>(r.evidence as string, []),
       relatedEventIds: safeJsonParse<string[]>(r.related_event_ids as string, []),
       mitreTechniques: safeJsonParse<MitreTechnique[]>(r.mitre_techniques as string, []),
+      assignedTo: r.assigned_to ? String(r.assigned_to) : undefined,
       notes: r.analyst_notes ? String(r.analyst_notes) : undefined,
       geminiAnalysis: safeJsonParse<GeminiInvestigationResult | undefined>(
         r.gemini_analysis as string,

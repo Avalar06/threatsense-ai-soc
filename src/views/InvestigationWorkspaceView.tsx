@@ -26,7 +26,7 @@ import {
 import { SeverityBadge } from "../components/common/SeverityBadge.js";
 import { RiskScoreMeter } from "../components/common/RiskScoreMeter.js";
 import { MitreTag } from "../components/common/MitreTag.js";
-import { AlertStatus } from "../types/soc.js";
+import { AlertStatus, Severity } from "../types/soc.js";
 
 export const InvestigationWorkspaceView: React.FC = () => {
   const {
@@ -37,6 +37,8 @@ export const InvestigationWorkspaceView: React.FC = () => {
     triggerAlertInvestigation,
     isInvestigating,
     updateAlertStatus,
+    assignAlert,
+    escalateAlertToIncident,
     setActiveTab,
     iocs,
   } = useSoc();
@@ -44,6 +46,18 @@ export const InvestigationWorkspaceView: React.FC = () => {
   const [customNotes, setCustomNotes] = useState<string>("");
   const [expandedTimelineId, setExpandedTimelineId] = useState<string | null>(null);
   const [copiedIoc, setCopiedIoc] = useState<string | null>(null);
+  
+  // Analyst assignment state
+  const [isAssigning, setIsAssigning] = useState<boolean>(false);
+  const [assignmentError, setAssignmentError] = useState<string | null>(null);
+
+  // Escalate modal state
+  const [showEscalateModal, setShowEscalateModal] = useState<boolean>(false);
+  const [escalateTitle, setEscalateTitle] = useState<string>("");
+  const [escalateSeverity, setEscalateSeverity] = useState<Severity>("HIGH");
+  const [isEscalating, setIsEscalating] = useState<boolean>(false);
+  const [escalationSuccess, setEscalationSuccess] = useState<string | null>(null);
+  const [escalationError, setEscalationError] = useState<string | null>(null);
 
   if (!activeAlert) {
     return (
@@ -73,6 +87,45 @@ export const InvestigationWorkspaceView: React.FC = () => {
     setTimeout(() => setCopiedIoc(null), 2000);
   };
 
+  const handleAnalystChange = async (newAnalyst: string) => {
+    setAssignmentError(null);
+    setIsAssigning(true);
+    try {
+      await assignAlert(activeAlert.id, newAnalyst);
+    } catch (err: any) {
+      setAssignmentError(err.message || "Failed to update analyst assignment.");
+    } finally {
+      setIsAssigning(false);
+    }
+  };
+
+  const handleOpenEscalateModal = () => {
+    setEscalateTitle(`Incident: ${activeAlert.title}`);
+    setEscalateSeverity(activeAlert.severity);
+    setEscalationError(null);
+    setEscalationSuccess(null);
+    setShowEscalateModal(true);
+  };
+
+  const handleConfirmEscalation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!escalateTitle.trim()) return;
+
+    setIsEscalating(true);
+    setEscalationError(null);
+    try {
+      const created = await escalateAlertToIncident(activeAlert.id, escalateTitle.trim(), escalateSeverity);
+      setEscalationSuccess(`Successfully escalated alert to ${created.id}!`);
+      setTimeout(() => {
+        setShowEscalateModal(false);
+      }, 1500);
+    } catch (err: any) {
+      setEscalationError(err.message || "Failed to escalate alert to incident.");
+    } finally {
+      setIsEscalating(false);
+    }
+  };
+
   const analysis = activeAlert.geminiAnalysis;
 
   // Filter IOCs related to this alert or source IP
@@ -83,8 +136,33 @@ export const InvestigationWorkspaceView: React.FC = () => {
       activeAlert.evidence.some((e) => e.includes(i.value))
   );
 
+  const ANALYST_OPTIONS = [
+    "Unassigned",
+    "SOC-Tier2-Analyst",
+    "Incident-Responder-Lead",
+    "Threat-Hunter",
+    "SOC-Tier1-Triage",
+    "Senior-Security-Analyst",
+  ];
+
   return (
     <div className="p-6 space-y-6 max-w-[1600px] mx-auto overflow-y-auto">
+      {/* Escalation Notification Banner */}
+      {escalationSuccess && (
+        <div className="p-3 bg-emerald-950/90 border border-emerald-500/50 rounded-xl flex items-center justify-between text-emerald-200 text-xs">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+            <span>{escalationSuccess}</span>
+          </div>
+          <button
+            onClick={() => setEscalationSuccess(null)}
+            className="text-emerald-400 hover:text-emerald-200 text-xs font-mono"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Top Header & Alert Selector */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg">
         <div className="space-y-1">
@@ -143,6 +221,15 @@ export const InvestigationWorkspaceView: React.FC = () => {
             )}
           </button>
 
+          {/* Escalate to Incident Button */}
+          <button
+            onClick={handleOpenEscalateModal}
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-950/80 hover:bg-amber-900 border border-amber-500/60 text-amber-200 font-semibold text-xs transition-colors"
+          >
+            <ShieldAlert className="w-4 h-4 text-amber-400" />
+            <span>Escalate to Incident</span>
+          </button>
+
           {/* Generate Report Button */}
           <button
             onClick={() => setActiveTab("incident-reports")}
@@ -153,6 +240,82 @@ export const InvestigationWorkspaceView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Escalate to Incident Modal */}
+      {showEscalateModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-amber-400" />
+                <h3 className="font-bold text-base text-white">Escalate Alert to Incident</h3>
+              </div>
+              <button
+                onClick={() => setShowEscalateModal(false)}
+                className="text-slate-400 hover:text-white text-xs font-mono"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300">
+              This will create a new tracked Incident case and link alert <strong className="text-cyan-400 font-mono">{activeAlert.id}</strong> ({activeAlert.title}).
+            </p>
+
+            {escalationError && (
+              <div className="p-2.5 bg-red-950/90 border border-red-700 rounded text-red-200 text-xs">
+                {escalationError}
+              </div>
+            )}
+
+            <form onSubmit={handleConfirmEscalation} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-400 font-mono mb-1">Incident Title:</label>
+                <input
+                  type="text"
+                  value={escalateTitle}
+                  onChange={(e) => setEscalateTitle(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-amber-500 font-sans"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-400 font-mono mb-1">Incident Severity:</label>
+                <select
+                  value={escalateSeverity}
+                  onChange={(e) => setEscalateSeverity(e.target.value as Severity)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-amber-500 font-mono"
+                >
+                  <option value="CRITICAL">CRITICAL</option>
+                  <option value="HIGH">HIGH</option>
+                  <option value="MEDIUM">MEDIUM</option>
+                  <option value="LOW">LOW</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowEscalateModal(false)}
+                  disabled={isEscalating}
+                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isEscalating}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold transition-colors disabled:opacity-50"
+                >
+                  {isEscalating ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ShieldAlert className="w-3.5 h-3.5" />}
+                  <span>{isEscalating ? "Creating Incident..." : "Confirm Escalation"}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Main Grid: Alert Context Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -191,7 +354,7 @@ export const InvestigationWorkspaceView: React.FC = () => {
           <span className="text-[11px] text-slate-500 font-mono">Related Events: {activeAlert.relatedEventIds.length}</span>
         </div>
 
-        {/* Incident Status & Triage Notes */}
+        {/* Incident Status & Analyst Assignment */}
         <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-lg flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Triage Status</span>
@@ -208,7 +371,24 @@ export const InvestigationWorkspaceView: React.FC = () => {
             </select>
           </div>
           <div className="my-1 text-xs text-slate-300">
-            Assigned: <strong className="text-white">SOC-Tier2-Analyst</strong>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] text-slate-400">Assigned Analyst:</span>
+            </div>
+            <select
+              value={activeAlert.assignedTo || "Unassigned"}
+              disabled={isAssigning}
+              onChange={(e) => handleAnalystChange(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+            >
+              {ANALYST_OPTIONS.map((analyst) => (
+                <option key={analyst} value={analyst}>
+                  {analyst}
+                </option>
+              ))}
+            </select>
+            {assignmentError && (
+              <span className="text-[10px] text-red-400 block mt-0.5">{assignmentError}</span>
+            )}
           </div>
           <span className="text-[10px] text-slate-400 font-mono">
             Updated: {activeAlert.updatedAt ? new Date(activeAlert.updatedAt).toLocaleTimeString() : "Just now"}

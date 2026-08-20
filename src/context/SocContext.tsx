@@ -8,6 +8,7 @@ import {
   IncidentReport,
   IOC,
   SecurityEvent,
+  Severity,
   TimelineEvent,
 } from "../types/soc.js";
 import { SAMPLE_SCENARIOS } from "../data/sampleLogs.js";
@@ -85,6 +86,8 @@ interface SocContextType {
   ingestLogs: (rawLogText: string, defaultHost?: string) => Promise<{ eventsIngested: number; alertsGenerated: number }>;
   triggerAlertInvestigation: (alertId: string, customNotes?: string) => Promise<GeminiInvestigationResult | null>;
   updateAlertStatus: (alertId: string, status: AlertStatus) => Promise<void>;
+  assignAlert: (alertId: string, assignedTo: string) => Promise<void>;
+  escalateAlertToIncident: (alertId: string, title?: string, severity?: Severity) => Promise<Incident>;
   saveIncidentReport: (report: IncidentReport) => Promise<void>;
   createIncidentRecord: (incident: Partial<Incident>) => Promise<Incident>;
   updateIncidentRecord: (id: string, updates: Partial<Incident>) => Promise<void>;
@@ -408,6 +411,60 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const assignAlert = async (alertId: string, assignedTo: string): Promise<void> => {
+    const previousAlerts = [...alerts];
+    setAlerts((prev) =>
+      prev.map((a) => (a.id === alertId ? { ...a, assignedTo, updatedAt: new Date().toISOString() } : a))
+    );
+
+    try {
+      const updated = await apiUpdateAlert(alertId, {
+        assignedTo,
+        updatedAt: new Date().toISOString(),
+      });
+      setAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...a, ...updated } : a)));
+    } catch (err: any) {
+      console.error("Failed to update alert assignment on backend:", err);
+      setAlerts(previousAlerts);
+      throw err;
+    }
+  };
+
+  const escalateAlertToIncident = async (
+    alertId: string,
+    title?: string,
+    severity?: Severity
+  ): Promise<Incident> => {
+    const targetAlert = alerts.find((a) => a.id === alertId) || activeAlert;
+    const incidentTitle = title || (targetAlert ? `Incident: ${targetAlert.title}` : `Incident for ${alertId}`);
+    const incidentSeverity = severity || targetAlert?.severity || "HIGH";
+
+    const newIncident: Partial<Incident> = {
+      title: incidentTitle,
+      severity: incidentSeverity,
+      status: "OPEN",
+      priority: "P1",
+      leadAnalyst: targetAlert?.assignedTo || "SOC-Lead-Analyst",
+      alertIds: [alertId],
+      executiveSummary: targetAlert?.description || `Escalated from Alert ${alertId}`,
+      containmentActions: [],
+    };
+
+    const created = await apiCreateIncident(newIncident);
+    setIncidents((prev) => [created, ...prev.filter((i) => i.id !== created.id)]);
+    
+    // Automatically transition alert status to INVESTIGATING if it was NEW
+    if (targetAlert && targetAlert.status === "NEW") {
+      try {
+        await updateAlertStatus(alertId, "INVESTIGATING");
+      } catch (e) {
+        console.warn("Failed to update alert status on escalation:", e);
+      }
+    }
+
+    return created;
+  };
+
   const saveIncidentReport = async (report: IncidentReport): Promise<void> => {
     try {
       const persisted = await apiCreateReport(report);
@@ -481,6 +538,8 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ingestLogs,
         triggerAlertInvestigation,
         updateAlertStatus,
+        assignAlert,
+        escalateAlertToIncident,
         saveIncidentReport,
         createIncidentRecord,
         updateIncidentRecord,

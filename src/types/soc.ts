@@ -99,6 +99,7 @@ export interface Alert {
   relatedEventIds: string[];
   mitreTechniques: MitreTechnique[];
   description: string;
+  assignedTo?: string;
   notes?: string;
   geminiAnalysis?: GeminiInvestigationResult;
   updatedAt?: string;
@@ -200,14 +201,18 @@ export interface Incident {
   id: string;
   title: string;
   severity: Severity;
-  status: IncidentStatus;
+  status: IncidentStatus | string;
+  priority?: string;
   leadAnalyst?: string;
   assignedTo?: string;
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
   alertIds?: string[];
+  executiveSummary?: string;
+  containmentActions?: string[];
   summary?: string;
   scope?: string;
   tags?: string[];
+  alerts?: Alert[];
 }

@@ -219,6 +219,24 @@ ${customNotes || "Standard automated investigation trigger."}`;
     });
 
     const parsed = JSON.parse(response.text?.trim() || "{}");
+
+    // Phase 4A: Persist Gemini Investigation Result directly into SQLite for the target alert
+    if (alert && alert.id && getSocDatabase().existsAlert(alert.id)) {
+      try {
+        getSocDatabase().updateAlert(alert.id, {
+          geminiAnalysis: parsed,
+          aiConfidence: typeof parsed.confidenceScore === "number" ? parsed.confidenceScore : undefined,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (persistErr: any) {
+        console.error("Failed to persist Gemini investigation result to database:", persistErr);
+        return res.status(500).json({
+          error: "Failed to persist AI investigation result to database",
+          details: persistErr.message,
+        });
+      }
+    }
+
     return res.json({ success: true, analysis: parsed });
   } catch (error: any) {
     console.error("Error in /api/investigate:", error);
@@ -748,7 +766,7 @@ apiRouter.post("/alerts", (req: Request, res: Response) => {
   }
 });
 
-// PATCH /api/alerts/:id - Update analyst-controlled fields
+// PATCH /api/alerts/:id - Update analyst-controlled fields (status, notes, assignedTo, geminiAnalysis)
 apiRouter.patch("/alerts/:id", (req: Request, res: Response) => {
   try {
     const existing = getSocDatabase().getAlertById(req.params.id);
@@ -766,10 +784,33 @@ apiRouter.patch("/alerts/:id", (req: Request, res: Response) => {
       if (typeof body.status !== "string") {
         return sendError(res, 400, "INVALID_REQUEST", "status must be a string");
       }
-      updates.status = body.status;
+      updates.status = body.status as Alert["status"];
     }
     if (body.notes !== undefined || body.analystNotes !== undefined) {
       updates.notes = body.notes !== undefined ? String(body.notes) : String(body.analystNotes);
+    }
+    if (body.assignedTo !== undefined || body.assigned_to !== undefined) {
+      const rawAssigned = body.assignedTo !== undefined ? body.assignedTo : body.assigned_to;
+      if (rawAssigned !== null && typeof rawAssigned !== "string") {
+        return sendError(res, 400, "INVALID_REQUEST", "assignedTo must be a string or null");
+      }
+      updates.assignedTo = rawAssigned ? String(rawAssigned).trim() : undefined;
+    }
+    if (body.geminiAnalysis !== undefined || body.gemini_analysis !== undefined) {
+      const rawAnalysis = body.geminiAnalysis !== undefined ? body.geminiAnalysis : body.gemini_analysis;
+      if (rawAnalysis !== null && typeof rawAnalysis !== "object") {
+        return sendError(res, 400, "INVALID_REQUEST", "geminiAnalysis must be a valid object or null");
+      }
+      updates.geminiAnalysis = rawAnalysis;
+      if (rawAnalysis && typeof rawAnalysis.confidenceScore === "number") {
+        updates.aiConfidence = rawAnalysis.confidenceScore;
+      }
+    }
+    if (body.aiConfidence !== undefined) {
+      if (typeof body.aiConfidence !== "number" || isNaN(body.aiConfidence)) {
+        return sendError(res, 400, "INVALID_REQUEST", "aiConfidence must be a valid number");
+      }
+      updates.aiConfidence = body.aiConfidence;
     }
     if (body.updatedAt !== undefined) {
       updates.updatedAt = String(body.updatedAt);
@@ -1022,23 +1063,31 @@ apiRouter.get("/incidents", (req: Request, res: Response) => {
   }
 });
 
-// GET /api/incidents/:id - Retrieve incident by ID
+// GET /api/incidents/:id - Retrieve incident by ID with linked alerts
 apiRouter.get("/incidents/:id", (req: Request, res: Response) => {
   try {
     const incident = getSocDatabase().getIncidentById(req.params.id);
     if (!incident) {
       return sendError(res, 404, "NOT_FOUND", `Incident with ID '${req.params.id}' was not found`);
     }
+
+    const linkedAlerts = (incident.alertIds || [])
+      .map((alertId) => getSocDatabase().getAlertById(alertId))
+      .filter((a): a is Alert => Boolean(a));
+
     return res.json({
       success: true,
-      data: incident,
+      data: {
+        ...incident,
+        alerts: linkedAlerts,
+      },
     });
   } catch {
     return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve incident");
   }
 });
 
-// POST /api/incidents - Create incident record
+// POST /api/incidents - Create incident record with referenced alert validation & deduplication
 apiRouter.post("/incidents", (req: Request, res: Response) => {
   try {
     const body = req.body;
@@ -1063,6 +1112,24 @@ apiRouter.post("/incidents", (req: Request, res: Response) => {
       return sendError(res, 409, "CONFLICT", `Incident with ID '${id}' already exists`);
     }
 
+    // Validate and deduplicate alert IDs
+    let validatedAlertIds: string[] = [];
+    if (body.alertIds !== undefined) {
+      if (!Array.isArray(body.alertIds)) {
+        return sendError(res, 400, "INVALID_REQUEST", "alertIds must be an array of string IDs");
+      }
+      const rawIds: string[] = body.alertIds.map((item: any) => String(item).trim()).filter(Boolean);
+      const uniqueIds: string[] = Array.from(new Set<string>(rawIds));
+
+      // Ensure every referenced alert exists
+      for (const alertId of uniqueIds) {
+        if (!getSocDatabase().existsAlert(alertId)) {
+          return sendError(res, 404, "NOT_FOUND", `Referenced alert '${alertId}' was not found in database`);
+        }
+      }
+      validatedAlertIds = uniqueIds;
+    }
+
     const now = new Date().toISOString();
     const incident = {
       id,
@@ -1070,8 +1137,8 @@ apiRouter.post("/incidents", (req: Request, res: Response) => {
       severity,
       status,
       priority: body.priority || "P2",
-      leadAnalyst: body.leadAnalyst,
-      alertIds: Array.isArray(body.alertIds) ? body.alertIds : [],
+      leadAnalyst: body.leadAnalyst ? String(body.leadAnalyst).trim() : undefined,
+      alertIds: validatedAlertIds,
       executiveSummary: body.executiveSummary || "",
       containmentActions: Array.isArray(body.containmentActions) ? body.containmentActions : [],
       createdAt: body.createdAt || now,
@@ -1089,7 +1156,7 @@ apiRouter.post("/incidents", (req: Request, res: Response) => {
   }
 });
 
-// PATCH /api/incidents/:id - Update incident lifecycle fields
+// PATCH /api/incidents/:id - Update incident lifecycle fields with alert validation
 apiRouter.patch("/incidents/:id", (req: Request, res: Response) => {
   try {
     const existing = getSocDatabase().getIncidentById(req.params.id);
@@ -1108,7 +1175,22 @@ apiRouter.patch("/incidents/:id", (req: Request, res: Response) => {
     if (body.leadAnalyst !== undefined) updates.leadAnalyst = String(body.leadAnalyst);
     if (body.executiveSummary !== undefined) updates.executiveSummary = String(body.executiveSummary);
     if (Array.isArray(body.containmentActions)) updates.containmentActions = body.containmentActions;
-    if (Array.isArray(body.alertIds)) updates.alertIds = body.alertIds;
+    
+    if (body.alertIds !== undefined) {
+      if (!Array.isArray(body.alertIds)) {
+        return sendError(res, 400, "INVALID_REQUEST", "alertIds must be an array of string IDs");
+      }
+      const rawIds: string[] = body.alertIds.map((item: any) => String(item).trim()).filter(Boolean);
+      const uniqueIds: string[] = Array.from(new Set<string>(rawIds));
+
+      for (const alertId of uniqueIds) {
+        if (!getSocDatabase().existsAlert(alertId)) {
+          return sendError(res, 404, "NOT_FOUND", `Referenced alert '${alertId}' was not found in database`);
+        }
+      }
+      updates.alertIds = uniqueIds;
+    }
+
     if (body.closedAt !== undefined) updates.closedAt = String(body.closedAt);
     if (body.updatedAt !== undefined) updates.updatedAt = String(body.updatedAt);
 

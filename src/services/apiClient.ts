@@ -123,7 +123,15 @@ export async function createAlert(alert: Partial<Alert>): Promise<Alert> {
 
 export async function updateAlert(
   id: string,
-  updates: { status?: AlertStatus; notes?: string; updatedAt?: string }
+  updates: {
+    status?: AlertStatus;
+    notes?: string;
+    analystNotes?: string;
+    assignedTo?: string;
+    geminiAnalysis?: GeminiInvestigationResult;
+    aiConfidence?: number;
+    updatedAt?: string;
+  }
 ): Promise<Alert> {
   const res = await fetch(`/api/alerts/${encodeURIComponent(id)}`, {
     method: "PATCH",
