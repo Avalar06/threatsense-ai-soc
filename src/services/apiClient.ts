@@ -206,6 +206,7 @@ export interface IncidentFilterParams {
   status?: string;
   severity?: string;
   priority?: string;
+  leadAnalyst?: string;
   search?: string;
   limit?: number;
   offset?: number;
@@ -219,6 +220,7 @@ export async function getIncidents(
     if (filters.status && filters.status !== "ALL") query.set("status", filters.status);
     if (filters.severity && filters.severity !== "ALL") query.set("severity", filters.severity);
     if (filters.priority && filters.priority !== "ALL") query.set("priority", filters.priority);
+    if (filters.leadAnalyst && filters.leadAnalyst !== "ALL") query.set("leadAnalyst", filters.leadAnalyst);
     if (filters.search) query.set("search", filters.search);
     if (filters.limit) query.set("limit", String(filters.limit));
     if (filters.offset) query.set("offset", String(filters.offset));

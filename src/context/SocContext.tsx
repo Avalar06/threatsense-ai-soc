@@ -37,6 +37,7 @@ import {
 export type SocNavTab =
   | "dashboard"
   | "alerts"
+  | "incidents"
   | "log-analyzer"
   | "investigations"
   | "ioc-extractor"
@@ -67,10 +68,14 @@ interface SocContextType {
   alertsError: string | null;
   logsError: string | null;
   reportsError: string | null;
+  incidentsError: string | null;
 
   activeAlertId: string | null;
   setActiveAlertId: (id: string | null) => void;
   activeAlert: Alert | null;
+  activeIncidentId: string | null;
+  setActiveIncidentId: (id: string | null) => void;
+  activeIncident: Incident | null;
   activeInvestigationTimeline: TimelineEvent[];
   activeScenarioId: string;
   backendHealth: { status: string; geminiKeyConfigured: boolean };
@@ -90,10 +95,11 @@ interface SocContextType {
   escalateAlertToIncident: (alertId: string, title?: string, severity?: Severity) => Promise<Incident>;
   saveIncidentReport: (report: IncidentReport) => Promise<void>;
   createIncidentRecord: (incident: Partial<Incident>) => Promise<Incident>;
-  updateIncidentRecord: (id: string, updates: Partial<Incident>) => Promise<void>;
+  updateIncidentRecord: (id: string, updates: Partial<Incident>) => Promise<Incident>;
   resetToDefaultDemo: () => Promise<void>;
   clearAllData: () => void;
   openInvestigationForAlert: (alertId: string) => void;
+  openIncident: (incidentId: string) => void;
 }
 
 const SocContext = createContext<SocContextType | undefined>(undefined);
@@ -119,8 +125,10 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [alertsError, setAlertsError] = useState<string | null>(null);
   const [logsError, setLogsError] = useState<string | null>(null);
   const [reportsError, setReportsError] = useState<string | null>(null);
+  const [incidentsError, setIncidentsError] = useState<string | null>(null);
 
   const [activeAlertId, setActiveAlertId] = useState<string | null>(null);
+  const [activeIncidentId, setActiveIncidentId] = useState<string | null>(null);
   const [activeScenarioId, setActiveScenarioId] = useState<string>("scenario-apt-multistage");
   const [isInvestigating, setIsInvestigating] = useState<boolean>(false);
   const [backendHealth, setBackendHealth] = useState<{ status: string; geminiKeyConfigured: boolean }>({
@@ -193,10 +201,15 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loadIncidents = useCallback(async (filters?: IncidentFilterParams) => {
     setIncidentsLoading(true);
+    setIncidentsError(null);
     try {
       const res = await apiGetIncidents(filters);
       setIncidents(res.incidents);
+      if (res.incidents.length > 0) {
+        setActiveIncidentId((prev) => (prev && res.incidents.some((i) => i.id === prev) ? prev : res.incidents[0].id));
+      }
     } catch (err: any) {
+      setIncidentsError(err.message || "Failed to load incidents");
       console.warn("Failed to load incidents:", err);
     } finally {
       setIncidentsLoading(false);
@@ -289,6 +302,11 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!activeAlertId) return alerts[0] || null;
     return alerts.find((a) => a.id === activeAlertId) || alerts[0] || null;
   }, [activeAlertId, alerts]);
+
+  const activeIncident = useMemo(() => {
+    if (!activeIncidentId) return incidents[0] || null;
+    return incidents.find((i) => i.id === activeIncidentId) || incidents[0] || null;
+  }, [activeIncidentId, incidents]);
 
   // Timeline events for active alert
   const activeInvestigationTimeline = useMemo<TimelineEvent[]>(() => {
@@ -452,6 +470,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const created = await apiCreateIncident(newIncident);
     setIncidents((prev) => [created, ...prev.filter((i) => i.id !== created.id)]);
+    setActiveIncidentId(created.id);
     
     // Automatically transition alert status to INVESTIGATING if it was NEW
     if (targetAlert && targetAlert.status === "NEW") {
@@ -479,13 +498,15 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const createIncidentRecord = async (incident: Partial<Incident>): Promise<Incident> => {
     const created = await apiCreateIncident(incident);
-    setIncidents((prev) => [created, ...prev]);
+    setIncidents((prev) => [created, ...prev.filter((i) => i.id !== created.id)]);
+    setActiveIncidentId(created.id);
     return created;
   };
 
-  const updateIncidentRecord = async (id: string, updates: Partial<Incident>): Promise<void> => {
+  const updateIncidentRecord = async (id: string, updates: Partial<Incident>): Promise<Incident> => {
     const updated = await apiUpdateIncident(id, updates);
-    setIncidents((prev) => prev.map((inc) => (inc.id === id ? updated : inc)));
+    setIncidents((prev) => prev.map((inc) => (inc.id === id ? { ...inc, ...updated } : inc)));
+    return updated;
   };
 
   const resetToDefaultDemo = async () => {
@@ -494,11 +515,17 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const clearAllData = () => {
     setActiveAlertId(null);
+    setActiveIncidentId(null);
   };
 
   const openInvestigationForAlert = (alertId: string) => {
     setActiveAlertId(alertId);
     setActiveTab("investigations");
+  };
+
+  const openIncident = (incidentId: string) => {
+    setActiveIncidentId(incidentId);
+    setActiveTab("incidents");
   };
 
   return (
@@ -522,9 +549,13 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         alertsError,
         logsError,
         reportsError,
+        incidentsError,
         activeAlertId,
         setActiveAlertId,
         activeAlert,
+        activeIncidentId,
+        setActiveIncidentId,
+        activeIncident,
         activeInvestigationTimeline,
         activeScenarioId,
         backendHealth,
@@ -546,6 +577,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resetToDefaultDemo,
         clearAllData,
         openInvestigationForAlert,
+        openIncident,
       }}
     >
       {children}

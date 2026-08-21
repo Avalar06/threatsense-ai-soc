@@ -3,6 +3,7 @@ import { useSoc, SocNavTab } from "../../context/SocContext.js";
 import {
   LayoutDashboard,
   ShieldAlert,
+  FolderKanban,
   FileCode2,
   SearchCode,
   Fingerprint,
@@ -31,6 +32,7 @@ export const Sidebar: React.FC = () => {
     activeTab,
     setActiveTab,
     alerts,
+    incidents,
     iocs,
     incidentReports,
     activeScenarioId,
@@ -39,6 +41,9 @@ export const Sidebar: React.FC = () => {
   } = useSoc();
 
   const criticalAlertsCount = alerts.filter((a) => a.severity === "CRITICAL").length;
+  const activeIncidentsCount = incidents.filter(
+    (i) => i.status === "NEW" || i.status === "OPEN" || i.status === "INVESTIGATING"
+  ).length;
 
   const navItems: NavItem[] = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -48,6 +53,13 @@ export const Sidebar: React.FC = () => {
       icon: ShieldAlert,
       badge: alerts.length > 0 ? alerts.length : undefined,
       badgeColor: criticalAlertsCount > 0 ? "bg-red-500 text-white animate-pulse" : "bg-slate-800 text-slate-300",
+    },
+    {
+      id: "incidents",
+      label: "Incident Management",
+      icon: FolderKanban,
+      badge: activeIncidentsCount > 0 ? activeIncidentsCount : incidents.length > 0 ? incidents.length : undefined,
+      badgeColor: "bg-amber-950 text-amber-300 border border-amber-700/60",
     },
     { id: "log-analyzer", label: "Log Analyzer", icon: FileCode2 },
     {

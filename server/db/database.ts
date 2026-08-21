@@ -65,6 +65,7 @@ export interface IncidentFilters {
   status?: string;
   severity?: string;
   priority?: string;
+  leadAnalyst?: string;
   search?: string;
   limit?: number;
   offset?: number;
@@ -555,6 +556,10 @@ export class SocDatabase {
     if (filters.priority) {
       conditions.push("UPPER(priority) = UPPER(?)");
       params.push(filters.priority);
+    }
+    if (filters.leadAnalyst && filters.leadAnalyst.trim()) {
+      conditions.push("lead_analyst = ?");
+      params.push(filters.leadAnalyst.trim());
     }
     if (filters.search && filters.search.trim()) {
       const term = `%${filters.search.trim()}%`;

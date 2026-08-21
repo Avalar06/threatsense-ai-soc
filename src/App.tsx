@@ -4,6 +4,7 @@ import { Sidebar } from "./components/layout/Sidebar.js";
 import { TopBar } from "./components/layout/TopBar.js";
 import { DashboardView } from "./views/DashboardView.js";
 import { AlertsView } from "./views/AlertsView.js";
+import { IncidentsView } from "./views/IncidentsView.js";
 import { LogAnalyzerView } from "./views/LogAnalyzerView.js";
 import { InvestigationWorkspaceView } from "./views/InvestigationWorkspaceView.js";
 import { IocExtractorView } from "./views/IocExtractorView.js";
@@ -22,6 +23,7 @@ const MainContent: React.FC = () => {
       <main className="flex-1 overflow-y-auto custom-scrollbar bg-slate-950">
         {activeTab === "dashboard" && <DashboardView />}
         {activeTab === "alerts" && <AlertsView />}
+        {activeTab === "incidents" && <IncidentsView />}
         {activeTab === "log-analyzer" && <LogAnalyzerView />}
         {activeTab === "investigations" && <InvestigationWorkspaceView />}
         {activeTab === "ioc-extractor" && <IocExtractorView />}

@@ -1040,11 +1040,12 @@ apiRouter.post("/reports", (req: Request, res: Response) => {
 // GET /api/incidents - List incidents with status/severity filters
 apiRouter.get("/incidents", (req: Request, res: Response) => {
   try {
-    const { status, severity, priority, search, limit, offset } = req.query;
+    const { status, severity, priority, leadAnalyst, search, limit, offset } = req.query;
     const result = getSocDatabase().listIncidents({
       status: typeof status === "string" ? status : undefined,
       severity: typeof severity === "string" ? severity : undefined,
       priority: typeof priority === "string" ? priority : undefined,
+      leadAnalyst: typeof leadAnalyst === "string" ? leadAnalyst : undefined,
       search: typeof search === "string" ? search : undefined,
       limit: limit ? Number(limit) : undefined,
       offset: offset ? Number(offset) : undefined,
@@ -1170,9 +1171,11 @@ apiRouter.patch("/incidents/:id", (req: Request, res: Response) => {
     }
 
     const updates: Partial<typeof existing> = {};
+    if (body.title !== undefined) updates.title = String(body.title).trim();
+    if (body.severity !== undefined) updates.severity = String(body.severity);
     if (body.status !== undefined) updates.status = String(body.status);
     if (body.priority !== undefined) updates.priority = String(body.priority);
-    if (body.leadAnalyst !== undefined) updates.leadAnalyst = String(body.leadAnalyst);
+    if (body.leadAnalyst !== undefined) updates.leadAnalyst = body.leadAnalyst ? String(body.leadAnalyst).trim() : undefined;
     if (body.executiveSummary !== undefined) updates.executiveSummary = String(body.executiveSummary);
     if (Array.isArray(body.containmentActions)) updates.containmentActions = body.containmentActions;
     

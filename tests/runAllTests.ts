@@ -11,7 +11,8 @@ const tests = [
   "tests/integration/apiEndpoints.test.ts",
   "tests/integration/database.test.ts",
   "tests/integration/phase3Persistence.test.ts",
-  "tests/integration/phase4Foundation.test.ts"
+  "tests/integration/phase4Foundation.test.ts",
+  "tests/integration/phase4IncidentWorkspace.test.ts"
 ];
 
 let totalPassed = 0;

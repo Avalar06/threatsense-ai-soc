@@ -262,6 +262,13 @@ export const InvestigationWorkspaceView: React.FC = () => {
               This will create a new tracked Incident case and link alert <strong className="text-cyan-400 font-mono">{activeAlert.id}</strong> ({activeAlert.title}).
             </p>
 
+            {escalationSuccess && (
+              <div className="p-2.5 bg-emerald-950/90 border border-emerald-700 rounded text-emerald-200 text-xs flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{escalationSuccess}</span>
+              </div>
+            )}
+
             {escalationError && (
               <div className="p-2.5 bg-red-950/90 border border-red-700 rounded text-red-200 text-xs">
                 {escalationError}
