@@ -197,6 +197,57 @@ export interface DashboardStats {
 
 export type IncidentStatus = "NEW" | "OPEN" | "INVESTIGATING" | "CONTAINED" | "RESOLVED" | "CLOSED";
 
+export type ResponseActionType =
+  | "ISOLATE_HOST"
+  | "BLOCK_IP"
+  | "BLOCK_DOMAIN"
+  | "DISABLE_ACCOUNT"
+  | "KILL_PROCESS"
+  | "COLLECT_EVIDENCE";
+
+export type ResponseTargetType =
+  | "HOST"
+  | "IP"
+  | "DOMAIN"
+  | "ACCOUNT"
+  | "PROCESS"
+  | "EVIDENCE";
+
+export type ResponseActionStatus =
+  | "REQUESTED"
+  | "APPROVED"
+  | "EXECUTED"
+  | "FAILED"
+  | "CANCELLED";
+
+export interface IncidentResponseAction {
+  id: string;
+  incidentId: string;
+  actionType: ResponseActionType;
+  targetType: ResponseTargetType;
+  target: string;
+  status: ResponseActionStatus;
+  requestedBy: string;
+  approvedBy?: string;
+  requestedAt: string;
+  approvedAt?: string;
+  executedAt?: string;
+  result?: string;
+  notes?: string;
+  metadata?: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const VALID_ACTION_TARGET_MAP: Record<ResponseActionType, ResponseTargetType[]> = {
+  ISOLATE_HOST: ["HOST"],
+  BLOCK_IP: ["IP"],
+  BLOCK_DOMAIN: ["DOMAIN"],
+  DISABLE_ACCOUNT: ["ACCOUNT"],
+  KILL_PROCESS: ["PROCESS"],
+  COLLECT_EVIDENCE: ["EVIDENCE", "HOST"],
+};
+
 export interface Incident {
   id: string;
   title: string;
@@ -211,6 +262,7 @@ export interface Incident {
   alertIds?: string[];
   executiveSummary?: string;
   containmentActions?: string[];
+  responseActions?: IncidentResponseAction[];
   summary?: string;
   scope?: string;
   tags?: string[];

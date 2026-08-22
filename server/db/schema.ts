@@ -106,6 +106,27 @@ CREATE TABLE IF NOT EXISTS ioc_records (
   tags TEXT
 );
 
+-- Incident Response Actions (Containment & Remediation Tracking) Table
+CREATE TABLE IF NOT EXISTS incident_response_actions (
+  id TEXT PRIMARY KEY,
+  incident_id TEXT NOT NULL,
+  action_type TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'REQUESTED',
+  requested_by TEXT NOT NULL,
+  approved_by TEXT,
+  requested_at TEXT NOT NULL,
+  approved_at TEXT,
+  executed_at TEXT,
+  result TEXT,
+  notes TEXT,
+  metadata TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE
+);
+
 -- Indexes for Fast Querying
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
@@ -129,6 +150,11 @@ CREATE INDEX IF NOT EXISTS idx_reports_created_at ON incident_reports(created_at
 CREATE INDEX IF NOT EXISTS idx_iocs_type ON ioc_records(type);
 CREATE INDEX IF NOT EXISTS idx_iocs_value ON ioc_records(value);
 CREATE INDEX IF NOT EXISTS idx_iocs_threat_level ON ioc_records(threat_level);
+
+CREATE INDEX IF NOT EXISTS idx_actions_incident_id ON incident_response_actions(incident_id);
+CREATE INDEX IF NOT EXISTS idx_actions_status ON incident_response_actions(status);
+CREATE INDEX IF NOT EXISTS idx_actions_action_type ON incident_response_actions(action_type);
+CREATE INDEX IF NOT EXISTS idx_actions_requested_at ON incident_response_actions(requested_at);
 `;
 
 export const REQUIRED_TABLES = [
@@ -136,7 +162,8 @@ export const REQUIRED_TABLES = [
   "security_events",
   "incidents",
   "incident_reports",
-  "ioc_records"
+  "ioc_records",
+  "incident_response_actions"
 ] as const;
 
 export const REQUIRED_INDEXES = [
@@ -157,7 +184,11 @@ export const REQUIRED_INDEXES = [
   "idx_reports_created_at",
   "idx_iocs_type",
   "idx_iocs_value",
-  "idx_iocs_threat_level"
+  "idx_iocs_threat_level",
+  "idx_actions_incident_id",
+  "idx_actions_status",
+  "idx_actions_action_type",
+  "idx_actions_requested_at"
 ] as const;
 
 /**

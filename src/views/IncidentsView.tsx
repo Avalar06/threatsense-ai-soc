@@ -24,11 +24,30 @@ import {
   Flame,
   Terminal,
   Activity,
+  Zap,
+  Ban,
+  Lock,
+  Play,
+  XCircle,
+  AlertOctagon,
+  Info,
+  CornerDownRight,
+  Crosshair,
 } from "lucide-react";
 import { SeverityBadge } from "../components/common/SeverityBadge.js";
 import { RiskScoreMeter } from "../components/common/RiskScoreMeter.js";
 import { MitreTag } from "../components/common/MitreTag.js";
-import { Incident, IncidentStatus, Severity, Alert } from "../types/soc.js";
+import {
+  Incident,
+  IncidentStatus,
+  Severity,
+  Alert,
+  ResponseActionType,
+  ResponseTargetType,
+  ResponseActionStatus,
+  IncidentResponseAction,
+  VALID_ACTION_TARGET_MAP,
+} from "../types/soc.js";
 
 const ANALYST_OPTIONS = [
   "SOC-Tier2-Analyst",
@@ -38,6 +57,101 @@ const ANALYST_OPTIONS = [
   "Senior-Security-Analyst",
   "Unassigned",
 ];
+
+const ACTION_TYPE_CONFIG: Record<
+  ResponseActionType,
+  { label: string; bg: string; text: string; border: string; defaultTarget: ResponseTargetType; icon: React.FC<{ className?: string }> }
+> = {
+  ISOLATE_HOST: {
+    label: "Isolate Host",
+    bg: "bg-rose-950/80",
+    text: "text-rose-300",
+    border: "border-rose-700/60",
+    defaultTarget: "HOST",
+    icon: Lock,
+  },
+  BLOCK_IP: {
+    label: "Block IP",
+    bg: "bg-amber-950/80",
+    text: "text-amber-300",
+    border: "border-amber-700/60",
+    defaultTarget: "IP",
+    icon: Ban,
+  },
+  BLOCK_DOMAIN: {
+    label: "Block Domain",
+    bg: "bg-orange-950/80",
+    text: "text-orange-300",
+    border: "border-orange-700/60",
+    defaultTarget: "DOMAIN",
+    icon: Ban,
+  },
+  DISABLE_ACCOUNT: {
+    label: "Disable Account",
+    bg: "bg-purple-950/80",
+    text: "text-purple-300",
+    border: "border-purple-700/60",
+    defaultTarget: "ACCOUNT",
+    icon: UserCheck,
+  },
+  KILL_PROCESS: {
+    label: "Kill Process",
+    bg: "bg-red-950/80",
+    text: "text-red-300",
+    border: "border-red-700/60",
+    defaultTarget: "PROCESS",
+    icon: Zap,
+  },
+  COLLECT_EVIDENCE: {
+    label: "Collect Evidence",
+    bg: "bg-cyan-950/80",
+    text: "text-cyan-300",
+    border: "border-cyan-700/60",
+    defaultTarget: "EVIDENCE",
+    icon: FileText,
+  },
+};
+
+const ACTION_STATUS_CONFIG: Record<
+  ResponseActionStatus,
+  { label: string; bg: string; text: string; border: string; dot: string }
+> = {
+  REQUESTED: {
+    label: "REQUESTED",
+    bg: "bg-amber-950/80",
+    text: "text-amber-300",
+    border: "border-amber-700/60",
+    dot: "bg-amber-400",
+  },
+  APPROVED: {
+    label: "APPROVED",
+    bg: "bg-blue-950/80",
+    text: "text-blue-300",
+    border: "border-blue-700/60",
+    dot: "bg-blue-400",
+  },
+  EXECUTED: {
+    label: "EXECUTED",
+    bg: "bg-emerald-950/80",
+    text: "text-emerald-300",
+    border: "border-emerald-700/60",
+    dot: "bg-emerald-400",
+  },
+  FAILED: {
+    label: "FAILED",
+    bg: "bg-rose-950/80",
+    text: "text-rose-300",
+    border: "border-rose-700/60",
+    dot: "bg-rose-400",
+  },
+  CANCELLED: {
+    label: "CANCELLED",
+    bg: "bg-slate-900",
+    text: "text-slate-400",
+    border: "border-slate-700",
+    dot: "bg-slate-500",
+  },
+};
 
 const STATUS_CONFIG: Record<
   IncidentStatus,
@@ -97,15 +211,21 @@ const PRIORITY_CONFIG: Record<string, { bg: string; text: string; border: string
 export const IncidentsView: React.FC = () => {
   const {
     incidents,
+    incidentActions,
+    actionsLoading,
+    actionsError,
     alerts,
     events,
     incidentsLoading,
     incidentsError,
     loadIncidents,
+    loadIncidentActions,
     activeIncidentId,
     setActiveIncidentId,
     updateIncidentRecord,
     createIncidentRecord,
+    createIncidentAction,
+    updateIncidentAction,
     openInvestigationForAlert,
     setActiveTab,
   } = useSoc();
@@ -138,6 +258,24 @@ export const IncidentsView: React.FC = () => {
   const [isCreating, setIsCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  // Response Action Modal state
+  const [showAddActionModal, setShowAddActionModal] = useState(false);
+  const [actionType, setActionType] = useState<ResponseActionType>("ISOLATE_HOST");
+  const [targetType, setTargetType] = useState<ResponseTargetType>("HOST");
+  const [targetValue, setTargetValue] = useState("");
+  const [actionRequestedBy, setActionRequestedBy] = useState("SOC-Tier2-Analyst");
+  const [actionNotes, setActionNotes] = useState("");
+  const [actionSubmitting, setActionSubmitting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const handleActionTypeChange = (type: ResponseActionType) => {
+    setActionType(type);
+    const validTargets = VALID_ACTION_TARGET_MAP[type];
+    if (validTargets && validTargets.length > 0) {
+      setTargetType(validTargets[0]);
+    }
+  };
+
   // Filtered incidents
   const filteredIncidents = useMemo(() => {
     return incidents.filter((inc) => {
@@ -169,6 +307,7 @@ export const IncidentsView: React.FC = () => {
     if (activeIncident) {
       setTitleValue(activeIncident.title);
       setSummaryValue(activeIncident.executiveSummary || "");
+      setActionRequestedBy(activeIncident.leadAnalyst || "SOC-Tier2-Analyst");
       setEditingTitle(false);
       setEditingSummary(false);
       setSaveSuccessMessage(null);
@@ -193,6 +332,48 @@ export const IncidentsView: React.FC = () => {
     });
     return events.filter((e) => eventIds.has(e.id));
   }, [linkedAlerts, events]);
+
+  // Suggested targets from active incident's correlated events & alerts
+  const incidentSuggestedTargets = useMemo(() => {
+    const suggestions: { label: string; value: string; type: ResponseTargetType }[] = [];
+    const seen = new Set<string>();
+
+    correlatedEvents.forEach((evt) => {
+      if (evt.hostname && !seen.has(evt.hostname)) {
+        seen.add(evt.hostname);
+        suggestions.push({ label: `Host: ${evt.hostname}`, value: evt.hostname, type: "HOST" });
+      }
+      if (evt.source_ip && evt.source_ip !== "127.0.0.1" && !seen.has(evt.source_ip)) {
+        seen.add(evt.source_ip);
+        suggestions.push({ label: `IP: ${evt.source_ip}`, value: evt.source_ip, type: "IP" });
+      }
+      if (evt.destination_ip && evt.destination_ip !== "127.0.0.1" && !seen.has(evt.destination_ip)) {
+        seen.add(evt.destination_ip);
+        suggestions.push({ label: `IP: ${evt.destination_ip}`, value: evt.destination_ip, type: "IP" });
+      }
+      if (evt.username && evt.username !== "SYSTEM" && !seen.has(evt.username)) {
+        seen.add(evt.username);
+        suggestions.push({ label: `User: ${evt.username}`, value: evt.username, type: "ACCOUNT" });
+      }
+      if (evt.process && !seen.has(evt.process)) {
+        seen.add(evt.process);
+        suggestions.push({ label: `Process: ${evt.process}`, value: evt.process, type: "PROCESS" });
+      }
+    });
+
+    linkedAlerts.forEach((alert) => {
+      if (alert.sourceIp && !seen.has(alert.sourceIp)) {
+        seen.add(alert.sourceIp);
+        suggestions.push({ label: `Alert IP: ${alert.sourceIp}`, value: alert.sourceIp, type: "IP" });
+      }
+      if (alert.targetHost && !seen.has(alert.targetHost)) {
+        seen.add(alert.targetHost);
+        suggestions.push({ label: `Alert Host: ${alert.targetHost}`, value: alert.targetHost, type: "HOST" });
+      }
+    });
+
+    return suggestions;
+  }, [correlatedEvents, linkedAlerts]);
 
   const showToast = (msg: string, isError = false) => {
     if (isError) {
@@ -268,6 +449,85 @@ export const IncidentsView: React.FC = () => {
       setCreateError(err.message || "Failed to create incident");
     } finally {
       setIsCreating(false);
+    }
+  };
+
+  const handleAddActionSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeIncident) return;
+    if (!targetValue.trim()) {
+      setActionError("Please specify a target (e.g. Host, IP, Domain, Account, Process).");
+      return;
+    }
+    setActionSubmitting(true);
+    setActionError(null);
+    try {
+      await createIncidentAction(activeIncident.id, {
+        actionType,
+        targetType,
+        target: targetValue.trim(),
+        requestedBy: actionRequestedBy.trim() || activeIncident.leadAnalyst || "SOC-Tier2-Analyst",
+        notes: actionNotes.trim() || undefined,
+      });
+      setShowAddActionModal(false);
+      setTargetValue("");
+      setActionNotes("");
+      showToast("Response action created in REQUESTED state");
+    } catch (err: any) {
+      setActionError(err.message || "Failed to create response action");
+    } finally {
+      setActionSubmitting(false);
+    }
+  };
+
+  const handleApproveAction = async (actionId: string) => {
+    if (!activeIncident) return;
+    try {
+      await updateIncidentAction(activeIncident.id, actionId, {
+        status: "APPROVED",
+        approvedBy: activeIncident.leadAnalyst || "SOC-Lead-Analyst",
+      });
+      showToast("Response action APPROVED");
+    } catch (err: any) {
+      showToast(err.message || "Failed to approve action", true);
+    }
+  };
+
+  const handleExecuteAction = async (actionId: string) => {
+    if (!activeIncident) return;
+    try {
+      await updateIncidentAction(activeIncident.id, actionId, {
+        status: "EXECUTED",
+      });
+      showToast("Simulated containment action EXECUTED & recorded");
+    } catch (err: any) {
+      showToast(err.message || "Failed to execute action", true);
+    }
+  };
+
+  const handleFailAction = async (actionId: string) => {
+    if (!activeIncident) return;
+    try {
+      await updateIncidentAction(activeIncident.id, actionId, {
+        status: "FAILED",
+        result: "Simulated containment action marked as FAILED by analyst.",
+      });
+      showToast("Response action marked as FAILED");
+    } catch (err: any) {
+      showToast(err.message || "Failed to mark action as failed", true);
+    }
+  };
+
+  const handleCancelAction = async (actionId: string) => {
+    if (!activeIncident) return;
+    try {
+      await updateIncidentAction(activeIncident.id, actionId, {
+        status: "CANCELLED",
+        result: "Action cancelled by analyst.",
+      });
+      showToast("Response action CANCELLED");
+    } catch (err: any) {
+      showToast(err.message || "Failed to cancel action", true);
     }
   };
 
@@ -937,35 +1197,245 @@ export const IncidentsView: React.FC = () => {
                 </div>
               )}
 
-              {/* Containment Tracking Section (Read-Only Placeholder for Phase 4B-B) */}
-              <div className="p-5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between">
+              {/* Response & Containment Tracking Section */}
+              <div className="p-5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
                   <div className="flex items-center gap-2">
                     <Shield className="w-4 h-4 text-emerald-400" />
                     <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider font-mono">
-                      Containment Actions
+                      Response & Containment Actions ({incidentActions.length})
                     </h3>
                   </div>
-                  <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">
-                    Read-Only
-                  </span>
+
+                  <button
+                    onClick={() => {
+                      setActionError(null);
+                      setTargetValue("");
+                      setActionNotes("");
+                      setActionType("ISOLATE_HOST");
+                      setTargetType("HOST");
+                      setShowAddActionModal(true);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-emerald-950/50 transition-all self-start sm:self-auto"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Response Action</span>
+                  </button>
                 </div>
 
-                {activeIncident.containmentActions && activeIncident.containmentActions.length > 0 ? (
-                  <div className="space-y-1.5">
-                    {activeIncident.containmentActions.map((action, idx) => (
-                      <div
-                        key={idx}
-                        className="p-2 rounded bg-slate-950 border border-slate-800 text-xs font-mono text-emerald-300 flex items-center gap-2"
-                      >
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span>{action}</span>
-                      </div>
-                    ))}
+                {/* Simulation Safety Warning Banner */}
+                <div className="p-3 rounded-lg bg-amber-950/40 border border-amber-800/60 text-xs text-amber-200 flex items-start gap-2.5">
+                  <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <p className="font-semibold text-amber-300">
+                      Simulation & SOC Tracking Mode
+                    </p>
+                    <p className="text-[11px] text-amber-200/80">
+                      Simulation only — all containment steps are recorded in the SOC database for lifecycle tracking. No actual changes are made to live endpoints, accounts, processes, firewalls, or network configurations.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Response Actions List */}
+                {actionsLoading ? (
+                  <div className="p-6 text-center text-xs text-slate-400 font-mono flex items-center justify-center gap-2">
+                    <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
+                    <span>Loading incident response actions...</span>
+                  </div>
+                ) : actionsError ? (
+                  <div className="p-3 rounded-lg bg-rose-950/60 border border-rose-800 text-xs text-rose-300 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>{actionsError}</span>
+                  </div>
+                ) : incidentActions.length > 0 ? (
+                  <div className="space-y-3">
+                    {incidentActions.map((act) => {
+                      const typeConfig = ACTION_TYPE_CONFIG[act.actionType] || {
+                        label: act.actionType,
+                        bg: "bg-slate-900",
+                        text: "text-slate-300",
+                        border: "border-slate-700",
+                        icon: Shield,
+                      };
+                      const statusConfig = ACTION_STATUS_CONFIG[act.status] || {
+                        label: act.status,
+                        bg: "bg-slate-900",
+                        text: "text-slate-300",
+                        border: "border-slate-700",
+                        dot: "bg-slate-400",
+                      };
+                      const IconComponent = typeConfig.icon || Shield;
+
+                      return (
+                        <div
+                          key={act.id}
+                          className="p-4 rounded-xl bg-slate-950 border border-slate-800/90 space-y-3 transition-all hover:border-slate-700"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span
+                                className={`px-2.5 py-1 rounded-md text-xs font-mono font-bold border flex items-center gap-1.5 ${typeConfig.bg} ${typeConfig.text} ${typeConfig.border}`}
+                              >
+                                <IconComponent className="w-3.5 h-3.5 shrink-0" />
+                                <span>{typeConfig.label}</span>
+                              </span>
+
+                              <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 font-mono text-xs text-slate-200">
+                                <strong className="text-slate-400 mr-1">{act.targetType}:</strong>
+                                <span className="text-cyan-300 font-semibold">{act.target}</span>
+                              </span>
+
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border inline-flex items-center gap-1.5 ${statusConfig.bg} ${statusConfig.text} ${statusConfig.border}`}
+                              >
+                                <span className={`w-1.5 h-1.5 rounded-full ${statusConfig.dot}`} />
+                                <span>{statusConfig.label}</span>
+                              </span>
+                            </div>
+
+                            <span className="font-mono text-[10px] text-slate-500">
+                              {act.id}
+                            </span>
+                          </div>
+
+                          {/* Metadata & Audit Trail */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono text-slate-400 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800/60">
+                            <div>
+                              <span className="text-slate-500">Requested by: </span>
+                              <span className="text-slate-300 font-semibold">{act.requestedBy}</span>
+                              <span className="text-slate-500 ml-1.5">({new Date(act.requestedAt).toLocaleTimeString()})</span>
+                            </div>
+
+                            {act.approvedBy && (
+                              <div>
+                                <span className="text-slate-500">Approved by: </span>
+                                <span className="text-blue-300 font-semibold">{act.approvedBy}</span>
+                                {act.approvedAt && (
+                                  <span className="text-slate-500 ml-1.5">({new Date(act.approvedAt).toLocaleTimeString()})</span>
+                                )}
+                              </div>
+                            )}
+
+                            {act.executedAt && (
+                              <div className="sm:col-span-2">
+                                <span className="text-slate-500">Executed at: </span>
+                                <span className="text-emerald-300 font-semibold">{new Date(act.executedAt).toLocaleString()}</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Notes */}
+                          {act.notes && (
+                            <div className="text-xs text-slate-300 bg-slate-900/40 p-2 rounded border border-slate-800/40 font-sans">
+                              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider block mb-0.5">Analyst Notes</span>
+                              {act.notes}
+                            </div>
+                          )}
+
+                          {/* Result */}
+                          {act.result && (
+                            <div
+                              className={`p-2 rounded text-xs font-mono ${
+                                act.status === "EXECUTED"
+                                  ? "bg-emerald-950/30 border border-emerald-900/50 text-emerald-300"
+                                  : act.status === "FAILED"
+                                  ? "bg-rose-950/30 border border-rose-900/50 text-rose-300"
+                                  : "bg-slate-900 border border-slate-800 text-slate-400"
+                              }`}
+                            >
+                              <span className="text-[10px] uppercase font-bold tracking-wider block mb-0.5 opacity-80">
+                                Action Result
+                              </span>
+                              {act.result}
+                            </div>
+                          )}
+
+                          {/* Lifecycle Action Buttons */}
+                          <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-800/80">
+                            {act.status === "REQUESTED" && (
+                              <>
+                                <button
+                                  onClick={() => handleCancelAction(act.id)}
+                                  className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-400 hover:text-slate-200 text-xs font-semibold transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  onClick={() => handleApproveAction(act.id)}
+                                  className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1 shadow transition-colors"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Approve Action</span>
+                                </button>
+                              </>
+                            )}
+
+                            {act.status === "APPROVED" && (
+                              <>
+                                <button
+                                  onClick={() => handleCancelAction(act.id)}
+                                  className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-400 hover:text-slate-200 text-xs font-semibold transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  onClick={() => handleFailAction(act.id)}
+                                  className="px-2.5 py-1 rounded bg-rose-950/80 hover:bg-rose-900 border border-rose-700/60 text-rose-300 text-xs font-semibold transition-colors"
+                                >
+                                  Mark Failed
+                                </button>
+                                <button
+                                  onClick={() => handleExecuteAction(act.id)}
+                                  className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow transition-colors"
+                                >
+                                  <Play className="w-3.5 h-3.5" />
+                                  <span>Simulate Execution</span>
+                                </button>
+                              </>
+                            )}
+
+                            {["EXECUTED", "FAILED", "CANCELLED"].includes(act.status) && (
+                              <div className="text-[11px] font-mono text-slate-500 italic flex items-center gap-1.5">
+                                {act.status === "EXECUTED" && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                                {act.status === "FAILED" && <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />}
+                                {act.status === "CANCELLED" && <Ban className="w-3.5 h-3.5 text-slate-500 shrink-0" />}
+                                <span>Action finalized ({act.status.toLowerCase()})</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
-                  <div className="p-3 rounded bg-slate-950/60 border border-slate-800/80 text-xs text-slate-500 italic font-mono">
-                    No active containment actions logged. Host isolation & network quarantine tracking will be enabled in Phase 4B-B.
+                  <div className="p-5 rounded-lg bg-slate-950/60 border border-slate-800/80 text-center space-y-2">
+                    <p className="text-xs text-slate-400 font-mono">
+                      No response actions have been created for this incident yet.
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      Add containment actions to record host isolation, IP blocking, account disabling, or evidence preservation.
+                    </p>
+                  </div>
+                )}
+
+                {/* Legacy Containment Log compatibility */}
+                {activeIncident.containmentActions && activeIncident.containmentActions.length > 0 && (
+                  <div className="pt-3 border-t border-slate-800 space-y-2">
+                    <div className="flex items-center gap-1.5 text-slate-400 font-mono text-[11px] uppercase tracking-wider">
+                      <FolderKanban className="w-3.5 h-3.5 text-slate-500" />
+                      <span>Legacy Containment Entries (Historical)</span>
+                    </div>
+                    <div className="space-y-1">
+                      {activeIncident.containmentActions.map((action, idx) => (
+                        <div
+                          key={idx}
+                          className="p-2 rounded bg-slate-950/80 border border-slate-800/80 text-xs font-mono text-emerald-300 flex items-center gap-2"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          <span>{action}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -1081,6 +1551,166 @@ export const IncidentsView: React.FC = () => {
                   className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-bold"
                 >
                   {isCreating ? "Creating..." : "Create Incident"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ADD RESPONSE ACTION MODAL */}
+      {showAddActionModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <Shield className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-base font-bold text-white">Add Incident Response Action</h3>
+              </div>
+              <button
+                onClick={() => setShowAddActionModal(false)}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Simulation Warning in Modal */}
+            <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-xs text-amber-200 flex items-center gap-2">
+              <Info className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Simulated SOC action: recorded in audit trail without live system enforcement.</span>
+            </div>
+
+            {actionError && (
+              <div className="p-3 rounded bg-red-950/60 border border-red-800 text-xs text-red-200 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{actionError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleAddActionSubmit} className="space-y-3.5 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-slate-300 font-semibold">Action Type *</label>
+                  <select
+                    value={actionType}
+                    onChange={(e) => handleActionTypeChange(e.target.value as ResponseActionType)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
+                  >
+                    <option value="ISOLATE_HOST">ISOLATE_HOST</option>
+                    <option value="BLOCK_IP">BLOCK_IP</option>
+                    <option value="BLOCK_DOMAIN">BLOCK_DOMAIN</option>
+                    <option value="DISABLE_ACCOUNT">DISABLE_ACCOUNT</option>
+                    <option value="KILL_PROCESS">KILL_PROCESS</option>
+                    <option value="COLLECT_EVIDENCE">COLLECT_EVIDENCE</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-slate-300 font-semibold">Target Type *</label>
+                  <select
+                    value={targetType}
+                    onChange={(e) => setTargetType(e.target.value as ResponseTargetType)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
+                  >
+                    {(VALID_ACTION_TARGET_MAP[actionType] || [targetType]).map((tt) => (
+                      <option key={tt} value={tt}>
+                        {tt}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">
+                  Target Value ({targetType}) *
+                </label>
+                <input
+                  type="text"
+                  value={targetValue}
+                  onChange={(e) => setTargetValue(e.target.value)}
+                  placeholder={
+                    targetType === "HOST"
+                      ? "e.g. CORP-WS-84, FIN-SRV-01"
+                      : targetType === "IP"
+                      ? "e.g. 198.51.100.23, 10.0.0.15"
+                      : targetType === "DOMAIN"
+                      ? "e.g. malicious-c2-domain.com"
+                      : targetType === "ACCOUNT"
+                      ? "e.g. jdoe, svc_backup"
+                      : targetType === "PROCESS"
+                      ? "e.g. mimikatz.exe, powershell.exe"
+                      : "e.g. memory_dump_host01.raw"
+                  }
+                  required
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
+                />
+
+                {/* Quick autofill pills from incident */}
+                {incidentSuggestedTargets.length > 0 && (
+                  <div className="pt-1.5">
+                    <span className="text-[10px] font-mono text-slate-500 block mb-1">
+                      Quick select from incident assets:
+                    </span>
+                    <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                      {incidentSuggestedTargets.map((item, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => {
+                            setTargetValue(item.value);
+                            if ((VALID_ACTION_TARGET_MAP[actionType] || []).includes(item.type)) {
+                              setTargetType(item.type);
+                            }
+                          }}
+                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-cyan-300 border border-slate-700 transition-colors"
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">Requested By *</label>
+                <input
+                  type="text"
+                  value={actionRequestedBy}
+                  onChange={(e) => setActionRequestedBy(e.target.value)}
+                  placeholder="e.g. SOC-Tier2-Analyst"
+                  required
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-slate-300 font-semibold">Justification / Notes</label>
+                <textarea
+                  value={actionNotes}
+                  onChange={(e) => setActionNotes(e.target.value)}
+                  rows={2}
+                  placeholder="Provide containment rationale or instructions for analyst audit..."
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-emerald-500 font-sans"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowAddActionModal(false)}
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionSubmitting || !targetValue.trim()}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold flex items-center gap-1.5"
+                >
+                  {actionSubmitting ? "Creating..." : "Request Action"}
                 </button>
               </div>
             </form>

@@ -5,6 +5,7 @@ import {
   GeminiInvestigationResult,
   Incident,
   IncidentReport,
+  IncidentResponseAction,
   PhishingAnalysisResult,
   SecurityEvent,
   TimelineEvent,
@@ -262,6 +263,42 @@ export async function updateIncident(id: string, updates: Partial<Incident>): Pr
     body: JSON.stringify(updates),
   });
   return handleApiResponse<Incident>(res);
+}
+
+// ----------------------------------------------------
+// 5B. INCIDENT RESPONSE ACTIONS API (SIMULATED / TRACKING)
+// ----------------------------------------------------
+export async function getIncidentActions(incidentId: string): Promise<IncidentResponseAction[]> {
+  const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/actions`);
+  return handleApiResponse<IncidentResponseAction[]>(res);
+}
+
+export async function createIncidentAction(
+  incidentId: string,
+  action: Partial<IncidentResponseAction>
+): Promise<IncidentResponseAction> {
+  const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/actions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(action),
+  });
+  return handleApiResponse<IncidentResponseAction>(res);
+}
+
+export async function updateIncidentAction(
+  incidentId: string,
+  actionId: string,
+  updates: Partial<IncidentResponseAction>
+): Promise<IncidentResponseAction> {
+  const res = await fetch(
+    `/api/incidents/${encodeURIComponent(incidentId)}/actions/${encodeURIComponent(actionId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    }
+  );
+  return handleApiResponse<IncidentResponseAction>(res);
 }
 
 // ----------------------------------------------------

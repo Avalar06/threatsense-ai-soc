@@ -4,7 +4,8 @@ import { Type } from "@google/genai";
 import { SocDatabase } from "./db/database.js";
 import { parseRawLogs } from "../src/services/logParser.js";
 import { runDetectionEngine } from "../src/services/detectionEngine.js";
-import type { Alert, SecurityEvent, IncidentReport } from "../src/types/soc.js";
+import type { Alert, SecurityEvent, IncidentReport, ResponseActionType, ResponseTargetType, ResponseActionStatus } from "../src/types/soc.js";
+import { VALID_ACTION_TARGET_MAP } from "../src/types/soc.js";
 
 export const apiRouter: Router = express.Router();
 
@@ -1064,7 +1065,7 @@ apiRouter.get("/incidents", (req: Request, res: Response) => {
   }
 });
 
-// GET /api/incidents/:id - Retrieve incident by ID with linked alerts
+// GET /api/incidents/:id - Retrieve incident by ID with linked alerts and response actions
 apiRouter.get("/incidents/:id", (req: Request, res: Response) => {
   try {
     const incident = getSocDatabase().getIncidentById(req.params.id);
@@ -1076,11 +1077,14 @@ apiRouter.get("/incidents/:id", (req: Request, res: Response) => {
       .map((alertId) => getSocDatabase().getAlertById(alertId))
       .filter((a): a is Alert => Boolean(a));
 
+    const responseActions = getSocDatabase().getIncidentActionsByIncidentId(incident.id);
+
     return res.json({
       success: true,
       data: {
         ...incident,
         alerts: linkedAlerts,
+        responseActions,
       },
     });
   } catch {
@@ -1207,4 +1211,245 @@ apiRouter.patch("/incidents/:id", (req: Request, res: Response) => {
     return sendError(res, 500, "INTERNAL_ERROR", "Failed to update incident");
   }
 });
+
+// ==========================================
+// 6. INCIDENT RESPONSE ACTIONS API (SIMULATED / TRACKING ONLY)
+// ==========================================
+
+const ALLOWED_ACTION_TYPES: ResponseActionType[] = [
+  "ISOLATE_HOST",
+  "BLOCK_IP",
+  "BLOCK_DOMAIN",
+  "DISABLE_ACCOUNT",
+  "KILL_PROCESS",
+  "COLLECT_EVIDENCE",
+];
+
+const ALLOWED_TARGET_TYPES: ResponseTargetType[] = [
+  "HOST",
+  "IP",
+  "DOMAIN",
+  "ACCOUNT",
+  "PROCESS",
+  "EVIDENCE",
+];
+
+// GET /api/incidents/:id/actions - Get all response actions for an incident
+apiRouter.get("/incidents/:id/actions", (req: Request, res: Response) => {
+  try {
+    if (!getSocDatabase().existsIncident(req.params.id)) {
+      return sendError(res, 404, "NOT_FOUND", `Incident with ID '${req.params.id}' was not found`);
+    }
+
+    const actions = getSocDatabase().getIncidentActionsByIncidentId(req.params.id);
+    return res.json({
+      success: true,
+      data: actions,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve incident response actions");
+  }
+});
+
+// POST /api/incidents/:id/actions - Create response action in REQUESTED state
+apiRouter.post("/incidents/:id/actions", (req: Request, res: Response) => {
+  try {
+    const incidentId = req.params.id;
+    if (!getSocDatabase().existsIncident(incidentId)) {
+      return sendError(res, 404, "NOT_FOUND", `Incident with ID '${incidentId}' was not found`);
+    }
+
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a JSON object");
+    }
+
+    const { actionType, targetType, target, requestedBy, notes, metadata } = body;
+
+    if (!actionType || !ALLOWED_ACTION_TYPES.includes(actionType as ResponseActionType)) {
+      return sendError(
+        res,
+        400,
+        "INVALID_ACTION_TYPE",
+        `Invalid actionType '${actionType}'. Allowed types: ${ALLOWED_ACTION_TYPES.join(", ")}`
+      );
+    }
+
+    if (!targetType || !ALLOWED_TARGET_TYPES.includes(targetType as ResponseTargetType)) {
+      return sendError(
+        res,
+        400,
+        "INVALID_TARGET_TYPE",
+        `Invalid targetType '${targetType}'. Allowed types: ${ALLOWED_TARGET_TYPES.join(", ")}`
+      );
+    }
+
+    // Validate actionType -> targetType compatibility
+    const validTargets = VALID_ACTION_TARGET_MAP[actionType as ResponseActionType] || [];
+    if (!validTargets.includes(targetType as ResponseTargetType)) {
+      return sendError(
+        res,
+        400,
+        "TARGET_TYPE_MISMATCH",
+        `Target type '${targetType}' is invalid for action type '${actionType}'. Valid target types: ${validTargets.join(", ")}`
+      );
+    }
+
+    if (!target || typeof target !== "string" || !target.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: target");
+    }
+
+    if (!requestedBy || typeof requestedBy !== "string" || !requestedBy.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: requestedBy");
+    }
+
+    const now = new Date().toISOString();
+    const id = body.id || `ACT-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`;
+
+    const action = {
+      id,
+      incidentId,
+      actionType: actionType as ResponseActionType,
+      targetType: targetType as ResponseTargetType,
+      target: target.trim(),
+      status: "REQUESTED",
+      requestedBy: requestedBy.trim(),
+      requestedAt: body.requestedAt || now,
+      notes: notes ? String(notes).trim() : undefined,
+      metadata: metadata && typeof metadata === "object" ? metadata : undefined,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    getSocDatabase().insertIncidentAction(action);
+
+    return res.status(201).json({
+      success: true,
+      data: action,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to create incident response action");
+  }
+});
+
+// PATCH /api/incidents/:id/actions/:actionId - Controlled lifecycle transition & notes update
+apiRouter.patch("/incidents/:id/actions/:actionId", (req: Request, res: Response) => {
+  try {
+    const { id: incidentId, actionId } = req.params;
+
+    if (!getSocDatabase().existsIncident(incidentId)) {
+      return sendError(res, 404, "NOT_FOUND", `Incident with ID '${incidentId}' was not found`);
+    }
+
+    const existingAction = getSocDatabase().getIncidentActionById(actionId);
+    if (!existingAction) {
+      return sendError(res, 404, "NOT_FOUND", `Response action with ID '${actionId}' was not found`);
+    }
+
+    // Ensure action belongs to the requested incident
+    if (existingAction.incidentId !== incidentId) {
+      return sendError(
+        res,
+        400,
+        "INVALID_REQUEST",
+        `Action '${actionId}' does not belong to incident '${incidentId}'`
+      );
+    }
+
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a JSON object");
+    }
+
+    const now = new Date().toISOString();
+    const updates: Partial<typeof existingAction> = {};
+
+    if (body.status !== undefined) {
+      const targetStatus = String(body.status).toUpperCase();
+      const currentStatus = existingAction.status;
+
+      if (currentStatus === "REQUESTED") {
+        if (targetStatus === "APPROVED") {
+          updates.status = "APPROVED";
+          updates.approvedBy = body.approvedBy ? String(body.approvedBy).trim() : "SOC-Lead-Analyst";
+          updates.approvedAt = body.approvedAt || now;
+        } else if (targetStatus === "CANCELLED") {
+          updates.status = "CANCELLED";
+          updates.result = body.result ? String(body.result) : "Action cancelled by analyst.";
+        } else if (targetStatus === "REQUESTED") {
+          // No-op status update
+        } else {
+          return sendError(
+            res,
+            400,
+            "INVALID_TRANSITION",
+            `Cannot transition action from REQUESTED to '${targetStatus}'. Allowed transitions: APPROVED, CANCELLED`
+          );
+        }
+      } else if (currentStatus === "APPROVED") {
+        if (targetStatus === "EXECUTED") {
+          updates.status = "EXECUTED";
+          updates.executedAt = body.executedAt || now;
+          updates.result = body.result
+            ? String(body.result)
+            : `Simulated containment action (${existingAction.actionType} on ${existingAction.target}) recorded successfully.`;
+        } else if (targetStatus === "FAILED") {
+          updates.status = "FAILED";
+          updates.result = body.result
+            ? String(body.result)
+            : `Simulated action failed during execution.`;
+        } else if (targetStatus === "CANCELLED") {
+          updates.status = "CANCELLED";
+          updates.result = body.result ? String(body.result) : "Action cancelled by analyst.";
+        } else if (targetStatus === "APPROVED") {
+          // No-op status update
+        } else {
+          return sendError(
+            res,
+            400,
+            "INVALID_TRANSITION",
+            `Cannot transition action from APPROVED to '${targetStatus}'. Allowed transitions: EXECUTED, FAILED, CANCELLED`
+          );
+        }
+      } else if (["EXECUTED", "FAILED", "CANCELLED"].includes(currentStatus)) {
+        if (targetStatus !== currentStatus) {
+          return sendError(
+            res,
+            400,
+            "INVALID_TRANSITION",
+            `Action is in terminal status '${currentStatus}' and cannot be transitioned to '${targetStatus}'`
+          );
+        }
+      } else {
+        return sendError(
+          res,
+          400,
+          "INVALID_TRANSITION",
+          `Unknown current status '${currentStatus}'`
+        );
+      }
+    }
+
+    if (body.notes !== undefined) {
+      updates.notes = String(body.notes).trim();
+    }
+    if (body.result !== undefined && !updates.result) {
+      updates.result = String(body.result).trim();
+    }
+    if (body.approvedBy !== undefined && !updates.approvedBy) {
+      updates.approvedBy = String(body.approvedBy).trim();
+    }
+
+    getSocDatabase().updateIncidentAction(actionId, updates);
+    const updated = getSocDatabase().getIncidentActionById(actionId);
+
+    return res.json({
+      success: true,
+      data: updated,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to update response action");
+  }
+});
+
 

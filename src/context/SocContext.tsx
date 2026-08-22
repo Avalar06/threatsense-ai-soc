@@ -6,6 +6,7 @@ import {
   GeminiInvestigationResult,
   Incident,
   IncidentReport,
+  IncidentResponseAction,
   IOC,
   SecurityEvent,
   Severity,
@@ -27,6 +28,9 @@ import {
   createReport as apiCreateReport,
   createIncident as apiCreateIncident,
   updateIncident as apiUpdateIncident,
+  getIncidentActions as apiGetIncidentActions,
+  createIncidentAction as apiCreateIncidentAction,
+  updateIncidentAction as apiUpdateIncidentAction,
   AlertFilterParams,
   LogFilterParams,
   ReportFilterParams,
@@ -55,6 +59,7 @@ interface SocContextType {
   iocs: IOC[];
   incidentReports: IncidentReport[];
   incidents: Incident[];
+  incidentActions: IncidentResponseAction[];
   dashboardStats: DashboardStats | null;
   
   // Loading & Error States
@@ -63,12 +68,14 @@ interface SocContextType {
   logsLoading: boolean;
   reportsLoading: boolean;
   incidentsLoading: boolean;
+  actionsLoading: boolean;
   isIngesting: boolean;
   statsError: string | null;
   alertsError: string | null;
   logsError: string | null;
   reportsError: string | null;
   incidentsError: string | null;
+  actionsError: string | null;
 
   activeAlertId: string | null;
   setActiveAlertId: (id: string | null) => void;
@@ -87,6 +94,7 @@ interface SocContextType {
   loadLogs: (filters?: LogFilterParams) => Promise<void>;
   loadReports: (filters?: ReportFilterParams) => Promise<void>;
   loadIncidents: (filters?: IncidentFilterParams) => Promise<void>;
+  loadIncidentActions: (incidentId: string) => Promise<void>;
   loadScenario: (scenarioId: string) => Promise<void>;
   ingestLogs: (rawLogText: string, defaultHost?: string) => Promise<{ eventsIngested: number; alertsGenerated: number }>;
   triggerAlertInvestigation: (alertId: string, customNotes?: string) => Promise<GeminiInvestigationResult | null>;
@@ -96,6 +104,8 @@ interface SocContextType {
   saveIncidentReport: (report: IncidentReport) => Promise<void>;
   createIncidentRecord: (incident: Partial<Incident>) => Promise<Incident>;
   updateIncidentRecord: (id: string, updates: Partial<Incident>) => Promise<Incident>;
+  createIncidentAction: (incidentId: string, action: Partial<IncidentResponseAction>) => Promise<IncidentResponseAction>;
+  updateIncidentAction: (incidentId: string, actionId: string, updates: Partial<IncidentResponseAction>) => Promise<IncidentResponseAction>;
   resetToDefaultDemo: () => Promise<void>;
   clearAllData: () => void;
   openInvestigationForAlert: (alertId: string) => void;
@@ -111,6 +121,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [iocs, setIocs] = useState<IOC[]>([]);
   const [incidentReports, setIncidentReports] = useState<IncidentReport[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [incidentActions, setIncidentActions] = useState<IncidentResponseAction[]>([]);
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
 
   // Status & Error flags
@@ -119,6 +130,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [logsLoading, setLogsLoading] = useState<boolean>(false);
   const [reportsLoading, setReportsLoading] = useState<boolean>(false);
   const [incidentsLoading, setIncidentsLoading] = useState<boolean>(false);
+  const [actionsLoading, setActionsLoading] = useState<boolean>(false);
   const [isIngesting, setIsIngesting] = useState<boolean>(false);
 
   const [statsError, setStatsError] = useState<string | null>(null);
@@ -126,6 +138,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [logsError, setLogsError] = useState<string | null>(null);
   const [reportsError, setReportsError] = useState<string | null>(null);
   const [incidentsError, setIncidentsError] = useState<string | null>(null);
+  const [actionsError, setActionsError] = useState<string | null>(null);
 
   const [activeAlertId, setActiveAlertId] = useState<string | null>(null);
   const [activeIncidentId, setActiveIncidentId] = useState<string | null>(null);
@@ -215,6 +228,30 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setIncidentsLoading(false);
     }
   }, []);
+
+  const loadIncidentActions = useCallback(async (incidentId: string) => {
+    if (!incidentId) return;
+    setActionsLoading(true);
+    setActionsError(null);
+    try {
+      const actions = await apiGetIncidentActions(incidentId);
+      setIncidentActions(actions);
+    } catch (err: any) {
+      setActionsError(err.message || "Failed to load response actions");
+      console.warn("Failed to load incident response actions:", err);
+    } finally {
+      setActionsLoading(false);
+    }
+  }, []);
+
+  // Sync incident actions whenever activeIncidentId changes
+  useEffect(() => {
+    if (activeIncidentId) {
+      loadIncidentActions(activeIncidentId);
+    } else {
+      setIncidentActions([]);
+    }
+  }, [activeIncidentId, loadIncidentActions]);
 
   // Ingest logs to backend
   const ingestLogs = useCallback(
@@ -509,6 +546,25 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return updated;
   };
 
+  const createIncidentAction = async (
+    incidentId: string,
+    action: Partial<IncidentResponseAction>
+  ): Promise<IncidentResponseAction> => {
+    const created = await apiCreateIncidentAction(incidentId, action);
+    setIncidentActions((prev) => [created, ...prev.filter((a) => a.id !== created.id)]);
+    return created;
+  };
+
+  const updateIncidentAction = async (
+    incidentId: string,
+    actionId: string,
+    updates: Partial<IncidentResponseAction>
+  ): Promise<IncidentResponseAction> => {
+    const updated = await apiUpdateIncidentAction(incidentId, actionId, updates);
+    setIncidentActions((prev) => prev.map((a) => (a.id === actionId ? { ...a, ...updated } : a)));
+    return updated;
+  };
+
   const resetToDefaultDemo = async () => {
     await loadScenario("scenario-apt-multistage");
   };
@@ -516,6 +572,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const clearAllData = () => {
     setActiveAlertId(null);
     setActiveIncidentId(null);
+    setIncidentActions([]);
   };
 
   const openInvestigationForAlert = (alertId: string) => {
@@ -538,18 +595,21 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         iocs,
         incidentReports,
         incidents,
+        incidentActions,
         dashboardStats,
         statsLoading,
         alertsLoading,
         logsLoading,
         reportsLoading,
         incidentsLoading,
+        actionsLoading,
         isIngesting,
         statsError,
         alertsError,
         logsError,
         reportsError,
         incidentsError,
+        actionsError,
         activeAlertId,
         setActiveAlertId,
         activeAlert,
@@ -565,6 +625,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loadLogs,
         loadReports,
         loadIncidents,
+        loadIncidentActions,
         loadScenario,
         ingestLogs,
         triggerAlertInvestigation,
@@ -574,6 +635,8 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         saveIncidentReport,
         createIncidentRecord,
         updateIncidentRecord,
+        createIncidentAction,
+        updateIncidentAction,
         resetToDefaultDemo,
         clearAllData,
         openInvestigationForAlert,

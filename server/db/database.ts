@@ -15,8 +15,28 @@ import type {
   IncidentReport,
   IOC,
   MitreTechnique,
-  GeminiInvestigationResult
+  GeminiInvestigationResult,
+  IncidentResponseAction
 } from "../../src/types/soc.js";
+
+export interface IncidentResponseActionRecord {
+  id: string;
+  incidentId: string;
+  actionType: string;
+  targetType: string;
+  target: string;
+  status: string;
+  requestedBy: string;
+  approvedBy?: string;
+  requestedAt: string;
+  approvedAt?: string;
+  executedAt?: string;
+  result?: string;
+  notes?: string;
+  metadata?: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface IncidentRecord {
   id: string;
@@ -628,6 +648,97 @@ export class SocDatabase {
   }
 
   // ------------------------------------------
+  // INCIDENT RESPONSE ACTIONS REPOSITORY
+  // ------------------------------------------
+
+  insertIncidentAction(action: IncidentResponseActionRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO incident_response_actions (
+        id, incident_id, action_type, target_type, target, status,
+        requested_by, approved_by, requested_at, approved_at, executed_at,
+        result, notes, metadata, created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?
+      )
+    `);
+
+    stmt.run(
+      action.id,
+      action.incidentId,
+      action.actionType,
+      action.targetType,
+      action.target,
+      action.status,
+      action.requestedBy,
+      action.approvedBy ?? null,
+      action.requestedAt,
+      action.approvedAt ?? null,
+      action.executedAt ?? null,
+      action.result ?? null,
+      action.notes ?? null,
+      safeJsonStringify(action.metadata ?? null),
+      action.createdAt,
+      action.updatedAt
+    );
+  }
+
+  getIncidentActionById(id: string): IncidentResponseActionRecord | null {
+    const stmt = this.db.prepare("SELECT * FROM incident_response_actions WHERE id = ?");
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToIncidentAction(row);
+  }
+
+  existsIncidentAction(id: string): boolean {
+    const stmt = this.db.prepare("SELECT id FROM incident_response_actions WHERE id = ?");
+    return Boolean(stmt.get(id));
+  }
+
+  getIncidentActionsByIncidentId(incidentId: string): IncidentResponseActionRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM incident_response_actions 
+      WHERE incident_id = ? 
+      ORDER BY requested_at DESC, created_at DESC
+    `);
+    const rows = stmt.all(incidentId) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRowToIncidentAction(r));
+  }
+
+  updateIncidentAction(id: string, updates: Partial<IncidentResponseActionRecord>): boolean {
+    const current = this.getIncidentActionById(id);
+    if (!current) return false;
+    const merged = { ...current, ...updates, updatedAt: new Date().toISOString() };
+
+    const stmt = this.db.prepare(`
+      UPDATE incident_response_actions SET
+        status = ?,
+        approved_by = ?,
+        approved_at = ?,
+        executed_at = ?,
+        result = ?,
+        notes = ?,
+        metadata = ?,
+        updated_at = ?
+      WHERE id = ?
+    `);
+
+    stmt.run(
+      merged.status,
+      merged.approvedBy ?? null,
+      merged.approvedAt ?? null,
+      merged.executedAt ?? null,
+      merged.result ?? null,
+      merged.notes ?? null,
+      safeJsonStringify(merged.metadata ?? null),
+      merged.updatedAt,
+      id
+    );
+    return true;
+  }
+
+  // ------------------------------------------
   // INCIDENT REPORTS REPOSITORY
   // ------------------------------------------
 
@@ -924,6 +1035,27 @@ export class SocDatabase {
       confidence: Number(r.confidence || 0),
       firstSeen: String(r.first_seen),
       tags: safeJsonParse<string[]>(r.tags as string, [])
+    };
+  }
+
+  private mapRowToIncidentAction(r: Record<string, unknown>): IncidentResponseActionRecord {
+    return {
+      id: String(r.id),
+      incidentId: String(r.incident_id),
+      actionType: String(r.action_type),
+      targetType: String(r.target_type),
+      target: String(r.target),
+      status: String(r.status),
+      requestedBy: String(r.requested_by),
+      approvedBy: r.approved_by ? String(r.approved_by) : undefined,
+      requestedAt: String(r.requested_at),
+      approvedAt: r.approved_at ? String(r.approved_at) : undefined,
+      executedAt: r.executed_at ? String(r.executed_at) : undefined,
+      result: r.result ? String(r.result) : undefined,
+      notes: r.notes ? String(r.notes) : undefined,
+      metadata: safeJsonParse<Record<string, unknown> | null>(r.metadata as string, null),
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at)
     };
   }
 }
