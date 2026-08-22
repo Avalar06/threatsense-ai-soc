@@ -12,6 +12,9 @@ import { MitreAttackView } from "./views/MitreAttackView.js";
 import { PhishingAnalyzerView } from "./views/PhishingAnalyzerView.js";
 import { AiAnalystView } from "./views/AiAnalystView.js";
 import { IncidentReportsView } from "./views/IncidentReportsView.js";
+import { CorrelationsView } from "./views/CorrelationsView.js";
+import { SoarView } from "./views/SoarView.js";
+import { BenchmarksView } from "./views/BenchmarksView.js";
 import { SettingsView } from "./views/SettingsView.js";
 
 const MainContent: React.FC = () => {
@@ -20,10 +23,12 @@ const MainContent: React.FC = () => {
   return (
     <div className="flex-1 flex flex-col h-screen overflow-hidden bg-slate-950 text-slate-100 font-sans">
       <TopBar />
-      <main className="flex-1 overflow-y-auto custom-scrollbar bg-slate-950">
+      <main className="flex-1 overflow-y-auto custom-scrollbar bg-slate-950 p-6">
         {activeTab === "dashboard" && <DashboardView />}
         {activeTab === "alerts" && <AlertsView />}
         {activeTab === "incidents" && <IncidentsView />}
+        {activeTab === "correlations" && <CorrelationsView />}
+        {activeTab === "soar" && <SoarView />}
         {activeTab === "log-analyzer" && <LogAnalyzerView />}
         {activeTab === "investigations" && <InvestigationWorkspaceView />}
         {activeTab === "ioc-extractor" && <IocExtractorView />}
@@ -31,6 +36,7 @@ const MainContent: React.FC = () => {
         {activeTab === "phishing-analyzer" && <PhishingAnalyzerView />}
         {activeTab === "ai-analyst" && <AiAnalystView />}
         {activeTab === "incident-reports" && <IncidentReportsView />}
+        {activeTab === "benchmarks" && <BenchmarksView />}
         {activeTab === "settings" && <SettingsView />}
       </main>
     </div>

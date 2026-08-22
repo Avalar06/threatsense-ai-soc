@@ -12,6 +12,14 @@ import {
   IOC,
   IocEnrichment,
   MitreTechnique,
+  DetectionStrategy,
+  CorrelationRecord,
+  SoarPlaybook,
+  SoarPlaybookExecution,
+  SoarConnectorInfo,
+  SoarAuditLog,
+  SocMetrics,
+  BenchmarkResult,
 } from "../types/soc.js";
 
 // Helper for structured API errors
@@ -777,3 +785,301 @@ function generateFallbackReport(payload: any): Partial<IncidentReport> {
     analystConclusion: `The intrusion was identified and contained within SOC SLA thresholds. No unauthorized data exfiltration was observed. Incident is closed pending final forensic audit.`,
   };
 }
+
+// =========================================================================
+// PHASE 6: DETECTION STRATEGIES & CORRELATIONS CLIENT METHODS
+// =========================================================================
+
+export async function getDetectionStrategies(filters?: {
+  tactic?: string;
+  techniqueId?: string;
+  isActive?: boolean;
+  search?: string;
+}): Promise<DetectionStrategy[]> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.tactic) query.set("tactic", filters.tactic);
+    if (filters.techniqueId) query.set("techniqueId", filters.techniqueId);
+    if (filters.isActive !== undefined) query.set("isActive", String(filters.isActive));
+    if (filters.search) query.set("search", filters.search);
+  }
+  const res = await fetch(`/api/detection-strategies${query.toString() ? `?${query.toString()}` : ""}`);
+  return handleApiResponse<DetectionStrategy[]>(res);
+}
+
+export async function getDetectionStrategy(id: string): Promise<DetectionStrategy> {
+  const res = await fetch(`/api/detection-strategies/${encodeURIComponent(id)}`);
+  return handleApiResponse<DetectionStrategy>(res);
+}
+
+export async function getCorrelations(filters?: {
+  strategyId?: string;
+  severity?: string;
+  confidence?: string;
+  incidentId?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ correlations: CorrelationRecord[]; total: number; limit: number; offset: number }> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.strategyId) query.set("strategyId", filters.strategyId);
+    if (filters.severity) query.set("severity", filters.severity);
+    if (filters.confidence) query.set("confidence", filters.confidence);
+    if (filters.incidentId) query.set("incidentId", filters.incidentId);
+    if (filters.search) query.set("search", filters.search);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    if (filters.offset) query.set("offset", String(filters.offset));
+  }
+  const res = await fetch(`/api/correlations${query.toString() ? `?${query.toString()}` : ""}`);
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed to fetch correlations", json.error?.code, res.status);
+  }
+  return {
+    correlations: json.correlations || [],
+    total: json.total ?? (json.correlations?.length || 0),
+    limit: json.limit ?? (filters?.limit || 50),
+    offset: json.offset ?? (filters?.offset || 0),
+  };
+}
+
+export async function getCorrelation(id: string): Promise<CorrelationRecord> {
+  const res = await fetch(`/api/correlations/${encodeURIComponent(id)}`);
+  return handleApiResponse<CorrelationRecord>(res);
+}
+
+export async function runCorrelations(options?: {
+  windowSeconds?: number;
+  strategyIds?: string[];
+  incidentId?: string;
+}): Promise<{
+  status: string;
+  evaluatedStrategies: number;
+  correlationsFound: number;
+  newCorrelationsPersisted: number;
+  correlations: CorrelationRecord[];
+  explanations: string[];
+}> {
+  const res = await fetch("/api/correlations/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(options || {}),
+  });
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed running correlations", json.error?.code, res.status);
+  }
+  return json;
+}
+
+// =========================================================================
+// PHASE 7: SOAR PLAYBOOKS & CONNECTORS CLIENT METHODS
+// =========================================================================
+
+export async function getSoarConnectors(): Promise<SoarConnectorInfo[]> {
+  const res = await fetch("/api/soar-connectors");
+  return handleApiResponse<SoarConnectorInfo[]>(res);
+}
+
+export async function getPlaybooks(status?: string): Promise<SoarPlaybook[]> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await fetch(`/api/playbooks${query}`);
+  return handleApiResponse<SoarPlaybook[]>(res);
+}
+
+export async function getPlaybook(id: string): Promise<SoarPlaybook> {
+  const res = await fetch(`/api/playbooks/${encodeURIComponent(id)}`);
+  return handleApiResponse<SoarPlaybook>(res);
+}
+
+export async function createPlaybook(playbook: Partial<SoarPlaybook>): Promise<SoarPlaybook> {
+  const res = await fetch("/api/playbooks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(playbook),
+  });
+  return handleApiResponse<SoarPlaybook>(res);
+}
+
+export async function updatePlaybook(id: string, updates: Partial<SoarPlaybook>): Promise<SoarPlaybook> {
+  const res = await fetch(`/api/playbooks/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  return handleApiResponse<SoarPlaybook>(res);
+}
+
+export async function runPlaybook(
+  id: string,
+  options: {
+    initiatingUser: string;
+    incidentId?: string;
+    alertId?: string;
+    correlationId?: string;
+    idempotencyKey?: string;
+    autoApprove?: boolean;
+  }
+): Promise<SoarPlaybookExecution> {
+  const res = await fetch(`/api/playbooks/${encodeURIComponent(id)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(options),
+  });
+  return handleApiResponse<SoarPlaybookExecution>(res);
+}
+
+export async function getPlaybookExecutions(filters?: {
+  playbookId?: string;
+  status?: string;
+  incidentId?: string;
+  alertId?: string;
+  correlationId?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ executions: SoarPlaybookExecution[]; total: number; limit: number; offset: number }> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.playbookId) query.set("playbookId", filters.playbookId);
+    if (filters.status) query.set("status", filters.status);
+    if (filters.incidentId) query.set("incidentId", filters.incidentId);
+    if (filters.alertId) query.set("alertId", filters.alertId);
+    if (filters.correlationId) query.set("correlationId", filters.correlationId);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    if (filters.offset) query.set("offset", String(filters.offset));
+  }
+  const res = await fetch(`/api/playbook-executions${query.toString() ? `?${query.toString()}` : ""}`);
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed to fetch executions", json.error?.code, res.status);
+  }
+  return {
+    executions: json.executions || [],
+    total: json.total ?? (json.executions?.length || 0),
+    limit: json.limit ?? (filters?.limit || 50),
+    offset: json.offset ?? (filters?.offset || 0),
+  };
+}
+
+export async function getPlaybookExecution(id: string): Promise<SoarPlaybookExecution> {
+  const res = await fetch(`/api/playbook-executions/${encodeURIComponent(id)}`);
+  return handleApiResponse<SoarPlaybookExecution>(res);
+}
+
+export async function approvePlaybookExecution(id: string, approvedBy: string): Promise<SoarPlaybookExecution> {
+  const res = await fetch(`/api/playbook-executions/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approvedBy }),
+  });
+  return handleApiResponse<SoarPlaybookExecution>(res);
+}
+
+export async function rejectPlaybookExecution(id: string, actor: string, reason: string): Promise<SoarPlaybookExecution> {
+  const res = await fetch(`/api/playbook-executions/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actor, reason }),
+  });
+  return handleApiResponse<SoarPlaybookExecution>(res);
+}
+
+export async function cancelPlaybookExecution(id: string, actor: string, reason?: string): Promise<SoarPlaybookExecution> {
+  const res = await fetch(`/api/playbook-executions/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actor, reason }),
+  });
+  return handleApiResponse<SoarPlaybookExecution>(res);
+}
+
+export async function getSoarAuditLogs(filters?: {
+  executionId?: string;
+  incidentId?: string;
+  actionType?: string;
+  connectorId?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<SoarAuditLog[]> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.executionId) query.set("executionId", filters.executionId);
+    if (filters.incidentId) query.set("incidentId", filters.incidentId);
+    if (filters.actionType) query.set("actionType", filters.actionType);
+    if (filters.connectorId) query.set("connectorId", filters.connectorId);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    if (filters.offset) query.set("offset", String(filters.offset));
+  }
+  const res = await fetch(`/api/soar-audit-logs${query.toString() ? `?${query.toString()}` : ""}`);
+  return handleApiResponse<SoarAuditLog[]>(res);
+}
+
+// =========================================================================
+// OBSERVABILITY & BENCHMARKS CLIENT METHODS
+// =========================================================================
+
+export async function getSocMetrics(): Promise<SocMetrics> {
+  const res = await fetch("/api/metrics");
+  return handleApiResponse<SocMetrics>(res);
+}
+
+export async function runBenchmark(): Promise<BenchmarkResult> {
+  const res = await fetch("/api/benchmarks/evaluate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ adapterId: "ADAPTER-INTERNAL-VAL" })
+  });
+  return handleApiResponse<BenchmarkResult>(res);
+}
+
+export async function getBenchmarkAdapters(): Promise<import("../types/soc.js").DatasetAdapterMetadata[]> {
+  const res = await fetch("/api/benchmarks/adapters");
+  return handleApiResponse<import("../types/soc.js").DatasetAdapterMetadata[]>(res);
+}
+
+export async function evaluateBenchmarkDataset(payload: {
+  adapterId?: string;
+  samples?: import("../types/soc.js").NormalizedBenchmarkRecord[];
+  meta?: {
+    datasetName?: string;
+    datasetSource?: string;
+    datasetVersion?: string;
+    datasetHash?: string;
+    evaluationType?: "INTERNAL_VALIDATION" | "EXTERNAL_BENCHMARK";
+    limitations?: string[];
+  };
+}): Promise<BenchmarkResult> {
+  const res = await fetch("/api/benchmarks/evaluate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  return handleApiResponse<BenchmarkResult>(res);
+}
+
+export async function exportBenchmarkResult(
+  result: BenchmarkResult,
+  format: "json" | "csv" | "markdown"
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch("/api/benchmarks/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ result, format })
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: { message: "Export failed" } }));
+    throw new Error(err.error?.message || "Export failed");
+  }
+
+  const disposition = res.headers.get("Content-Disposition");
+  let filename = `benchmark-report.${format === "markdown" ? "md" : format}`;
+  if (disposition && disposition.includes("filename=")) {
+    filename = disposition.split("filename=")[1].replace(/"/g, "").trim();
+  }
+
+  const blob = await res.blob();
+  return { blob, filename };
+}
+

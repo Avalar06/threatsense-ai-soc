@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import { SCHEMA_SQL, safeJsonParse, safeJsonStringify } from "./schema.js";
+import { seedDefaultsIfEmpty } from "./seedDefaults.js";
 import type {
   Alert,
   SecurityEvent,
@@ -16,8 +17,53 @@ import type {
   IOC,
   MitreTechnique,
   GeminiInvestigationResult,
-  IncidentResponseAction
+  IncidentResponseAction,
+  DetectionStrategy,
+  CorrelationRecord,
+  CorrelationEvidence,
+  RiskContributor,
+  SoarPlaybook,
+  SoarPlaybookExecution,
+  PlaybookStepState,
+  SoarAuditLog,
+  SoarConnectorInfo
 } from "../../src/types/soc.js";
+
+export interface CorrelationFilters {
+  strategyId?: string;
+  severity?: string;
+  confidence?: string;
+  incidentId?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface StrategyFilters {
+  tactic?: string;
+  techniqueId?: string;
+  isActive?: boolean;
+  search?: string;
+}
+
+export interface ExecutionFilters {
+  playbookId?: string;
+  status?: string;
+  incidentId?: string;
+  alertId?: string;
+  correlationId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AuditLogFilters {
+  executionId?: string;
+  incidentId?: string;
+  actionType?: string;
+  connectorId?: string;
+  limit?: number;
+  offset?: number;
+}
 
 export interface IncidentResponseActionRecord {
   id: string;
@@ -167,6 +213,9 @@ export function initDatabase(dbPath: string = DEFAULT_DB_PATH): DatabaseSync {
 
   // Execute schema creation (CREATE TABLE IF NOT EXISTS & CREATE INDEX IF NOT EXISTS)
   db.exec(SCHEMA_SQL);
+
+  // Seed default detection strategies and playbooks if empty
+  seedDefaultsIfEmpty(db);
 
   return db;
 }
@@ -1164,6 +1213,531 @@ export class SocDatabase {
   }
 
   // ------------------------------------------
+  // DETECTION STRATEGIES REPOSITORY
+  // ------------------------------------------
+
+  insertDetectionStrategy(strategy: DetectionStrategy): void {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO detection_strategies (
+        id, name, description, technique_id, technique_name, tactic,
+        attack_version, analytic_conditions, required_telemetry,
+        supported_platforms, severity, confidence_model, evidence_requirements,
+        is_active, created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?
+      )
+    `);
+
+    const now = new Date().toISOString();
+    stmt.run(
+      strategy.id,
+      strategy.name,
+      strategy.description,
+      strategy.techniqueId,
+      strategy.techniqueName,
+      strategy.tactic,
+      strategy.attackVersion || "v15.1",
+      safeJsonStringify(strategy.analyticConditions || []),
+      safeJsonStringify(strategy.requiredTelemetry || []),
+      safeJsonStringify(strategy.supportedPlatforms || ["Windows", "Linux"]),
+      strategy.severity || "HIGH",
+      safeJsonStringify(strategy.confidenceModel || { baseConfidence: "HIGH", minEvidenceCount: 1 }),
+      safeJsonStringify(strategy.evidenceRequirements || []),
+      strategy.isActive ? 1 : 0,
+      strategy.createdAt || now,
+      strategy.updatedAt || now
+    );
+  }
+
+  getDetectionStrategyById(id: string): DetectionStrategy | null {
+    const stmt = this.db.prepare("SELECT * FROM detection_strategies WHERE id = ?");
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToDetectionStrategy(row);
+  }
+
+  listDetectionStrategies(filters: StrategyFilters = {}): DetectionStrategy[] {
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (filters.techniqueId) {
+      conditions.push("technique_id = ?");
+      params.push(filters.techniqueId);
+    }
+    if (filters.tactic) {
+      conditions.push("UPPER(tactic) = UPPER(?)");
+      params.push(filters.tactic);
+    }
+    if (filters.isActive !== undefined) {
+      conditions.push("is_active = ?");
+      params.push(filters.isActive ? 1 : 0);
+    }
+    if (filters.search) {
+      conditions.push("(name LIKE ? OR description LIKE ? OR technique_id LIKE ?)");
+      const term = `%${filters.search}%`;
+      params.push(term, term, term);
+    }
+
+    let query = "SELECT * FROM detection_strategies";
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(" AND ")}`;
+    }
+    query += " ORDER BY id ASC";
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRowToDetectionStrategy(r));
+  }
+
+  // ------------------------------------------
+  // CORRELATIONS REPOSITORY
+  // ------------------------------------------
+
+  insertCorrelation(correlation: CorrelationRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO correlations (
+        id, strategy_id, analytic_id, strategy_name,
+        matched_event_ids, matched_alert_ids, ioc_ids, incident_id,
+        severity, confidence, risk_score, contributors,
+        evidence, explanation, fingerprint, created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?, ?
+      )
+    `);
+
+    const now = new Date().toISOString();
+    stmt.run(
+      correlation.id,
+      correlation.strategyId,
+      correlation.analyticId,
+      correlation.strategyName || null,
+      safeJsonStringify(correlation.matchedEventIds || []),
+      safeJsonStringify(correlation.matchedAlertIds || []),
+      safeJsonStringify(correlation.iocIds || []),
+      correlation.incidentId || null,
+      correlation.severity,
+      correlation.confidence,
+      correlation.riskScore || 0,
+      safeJsonStringify(correlation.contributors || []),
+      safeJsonStringify(correlation.evidence || {}),
+      correlation.explanation,
+      correlation.fingerprint,
+      correlation.createdAt || now,
+      correlation.updatedAt || now
+    );
+  }
+
+  getCorrelationById(id: string): CorrelationRecord | null {
+    const stmt = this.db.prepare("SELECT * FROM correlations WHERE id = ?");
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToCorrelation(row);
+  }
+
+  getCorrelationByFingerprint(fingerprint: string): CorrelationRecord | null {
+    const stmt = this.db.prepare("SELECT * FROM correlations WHERE fingerprint = ?");
+    const row = stmt.get(fingerprint) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToCorrelation(row);
+  }
+
+  existsCorrelationFingerprint(fingerprint: string): boolean {
+    const stmt = this.db.prepare("SELECT id FROM correlations WHERE fingerprint = ?");
+    return Boolean(stmt.get(fingerprint));
+  }
+
+  listCorrelations(filters: CorrelationFilters = {}): {
+    correlations: CorrelationRecord[];
+    total: number;
+    limit: number;
+    offset: number;
+  } {
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (filters.strategyId) {
+      conditions.push("strategy_id = ?");
+      params.push(filters.strategyId);
+    }
+    if (filters.severity) {
+      conditions.push("UPPER(severity) = UPPER(?)");
+      params.push(filters.severity);
+    }
+    if (filters.confidence) {
+      conditions.push("UPPER(confidence) = UPPER(?)");
+      params.push(filters.confidence);
+    }
+    if (filters.incidentId) {
+      conditions.push("incident_id = ?");
+      params.push(filters.incidentId);
+    }
+    if (filters.search) {
+      conditions.push("(explanation LIKE ? OR strategy_name LIKE ?)");
+      const term = `%${filters.search}%`;
+      params.push(term, term);
+    }
+
+    const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+
+    const countStmt = this.db.prepare(`SELECT COUNT(*) as total FROM correlations${whereClause}`);
+    const countRow = countStmt.get(...params) as { total: number };
+    const total = countRow ? countRow.total : 0;
+
+    const limit = filters.limit !== undefined ? Math.max(1, filters.limit) : 50;
+    const offset = filters.offset !== undefined ? Math.max(0, filters.offset) : 0;
+
+    const selectQuery = `
+      SELECT * FROM correlations
+      ${whereClause}
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    const selectStmt = this.db.prepare(selectQuery);
+    const rows = selectStmt.all(...params, limit, offset) as Record<string, unknown>[];
+
+    return {
+      correlations: rows.map((r) => this.mapRowToCorrelation(r)),
+      total,
+      limit,
+      offset
+    };
+  }
+
+  // ------------------------------------------
+  // SOAR PLAYBOOKS REPOSITORY
+  // ------------------------------------------
+
+  insertPlaybook(playbook: SoarPlaybook): void {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO soar_playbooks (
+        id, name, description, version, status,
+        trigger_type, trigger_conditions, policy, actions,
+        created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?
+      )
+    `);
+
+    const now = new Date().toISOString();
+    stmt.run(
+      playbook.id,
+      playbook.name,
+      playbook.description,
+      playbook.version || "1.0.0",
+      playbook.status || "ENABLED",
+      playbook.triggerType || "ALERT",
+      safeJsonStringify(playbook.triggerConditions || {}),
+      safeJsonStringify(playbook.policy || { requiresApproval: true }),
+      safeJsonStringify(playbook.actions || []),
+      playbook.createdAt || now,
+      playbook.updatedAt || now
+    );
+  }
+
+  updatePlaybook(id: string, updates: Partial<SoarPlaybook>): SoarPlaybook | null {
+    const existing = this.getPlaybookById(id);
+    if (!existing) return null;
+
+    const updated: SoarPlaybook = {
+      ...existing,
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+
+    const stmt = this.db.prepare(`
+      UPDATE soar_playbooks SET
+        name = ?,
+        description = ?,
+        version = ?,
+        status = ?,
+        trigger_type = ?,
+        trigger_conditions = ?,
+        policy = ?,
+        actions = ?,
+        updated_at = ?
+      WHERE id = ?
+    `);
+
+    stmt.run(
+      updated.name,
+      updated.description,
+      updated.version,
+      updated.status,
+      updated.triggerType,
+      safeJsonStringify(updated.triggerConditions),
+      safeJsonStringify(updated.policy),
+      safeJsonStringify(updated.actions),
+      updated.updatedAt,
+      id
+    );
+
+    return updated;
+  }
+
+  getPlaybookById(id: string): SoarPlaybook | null {
+    const stmt = this.db.prepare("SELECT * FROM soar_playbooks WHERE id = ?");
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToPlaybook(row);
+  }
+
+  listPlaybooks(status?: string): SoarPlaybook[] {
+    let query = "SELECT * FROM soar_playbooks";
+    const params: any[] = [];
+
+    if (status) {
+      query += " WHERE UPPER(status) = UPPER(?)";
+      params.push(status);
+    }
+    query += " ORDER BY name ASC";
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRowToPlaybook(r));
+  }
+
+  // ------------------------------------------
+  // SOAR PLAYBOOK EXECUTIONS REPOSITORY
+  // ------------------------------------------
+
+  insertPlaybookExecution(execution: SoarPlaybookExecution): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO soar_playbook_executions (
+        id, playbook_id, playbook_name, playbook_version,
+        incident_id, alert_id, correlation_id, initiating_user,
+        status, approved_by, approved_at, rejection_reason,
+        current_step_index, total_steps, steps_state,
+        idempotency_key, created_at, updated_at, completed_at
+      ) VALUES (
+        ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?
+      )
+    `);
+
+    const now = new Date().toISOString();
+    stmt.run(
+      execution.id,
+      execution.playbookId,
+      execution.playbookName,
+      execution.playbookVersion,
+      execution.incidentId || null,
+      execution.alertId || null,
+      execution.correlationId || null,
+      execution.initiatingUser,
+      execution.status || "PENDING",
+      execution.approvedBy || null,
+      execution.approvedAt || null,
+      execution.rejectionReason || null,
+      execution.currentStepIndex || 0,
+      execution.totalSteps || (execution.stepsState ? execution.stepsState.length : 0),
+      safeJsonStringify(execution.stepsState || []),
+      execution.idempotencyKey,
+      execution.createdAt || now,
+      execution.updatedAt || now,
+      execution.completedAt || null
+    );
+  }
+
+  updatePlaybookExecution(
+    id: string,
+    updates: Partial<SoarPlaybookExecution>
+  ): SoarPlaybookExecution | null {
+    const existing = this.getPlaybookExecutionById(id);
+    if (!existing) return null;
+
+    const merged: SoarPlaybookExecution = {
+      ...existing,
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+
+    const stmt = this.db.prepare(`
+      UPDATE soar_playbook_executions SET
+        status = ?,
+        approved_by = ?,
+        approved_at = ?,
+        rejection_reason = ?,
+        current_step_index = ?,
+        total_steps = ?,
+        steps_state = ?,
+        updated_at = ?,
+        completed_at = ?
+      WHERE id = ?
+    `);
+
+    stmt.run(
+      merged.status,
+      merged.approvedBy || null,
+      merged.approvedAt || null,
+      merged.rejectionReason || null,
+      merged.currentStepIndex,
+      merged.totalSteps,
+      safeJsonStringify(merged.stepsState),
+      merged.updatedAt,
+      merged.completedAt || null,
+      id
+    );
+
+    return merged;
+  }
+
+  getPlaybookExecutionById(id: string): SoarPlaybookExecution | null {
+    const stmt = this.db.prepare("SELECT * FROM soar_playbook_executions WHERE id = ?");
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToPlaybookExecution(row);
+  }
+
+  getPlaybookExecutionByIdempotencyKey(key: string): SoarPlaybookExecution | null {
+    const stmt = this.db.prepare("SELECT * FROM soar_playbook_executions WHERE idempotency_key = ?");
+    const row = stmt.get(key) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToPlaybookExecution(row);
+  }
+
+  listPlaybookExecutions(filters: ExecutionFilters = {}): {
+    executions: SoarPlaybookExecution[];
+    total: number;
+    limit: number;
+    offset: number;
+  } {
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (filters.playbookId) {
+      conditions.push("playbook_id = ?");
+      params.push(filters.playbookId);
+    }
+    if (filters.status) {
+      conditions.push("UPPER(status) = UPPER(?)");
+      params.push(filters.status);
+    }
+    if (filters.incidentId) {
+      conditions.push("incident_id = ?");
+      params.push(filters.incidentId);
+    }
+    if (filters.alertId) {
+      conditions.push("alert_id = ?");
+      params.push(filters.alertId);
+    }
+    if (filters.correlationId) {
+      conditions.push("correlation_id = ?");
+      params.push(filters.correlationId);
+    }
+
+    const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+
+    const countStmt = this.db.prepare(`SELECT COUNT(*) as total FROM soar_playbook_executions${whereClause}`);
+    const countRow = countStmt.get(...params) as { total: number };
+    const total = countRow ? countRow.total : 0;
+
+    const limit = filters.limit !== undefined ? Math.max(1, filters.limit) : 50;
+    const offset = filters.offset !== undefined ? Math.max(0, filters.offset) : 0;
+
+    const selectQuery = `
+      SELECT * FROM soar_playbook_executions
+      ${whereClause}
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    const selectStmt = this.db.prepare(selectQuery);
+    const rows = selectStmt.all(...params, limit, offset) as Record<string, unknown>[];
+
+    return {
+      executions: rows.map((r) => this.mapRowToPlaybookExecution(r)),
+      total,
+      limit,
+      offset
+    };
+  }
+
+  // ------------------------------------------
+  // SOAR AUDIT LOGS REPOSITORY
+  // ------------------------------------------
+
+  insertSoarAuditLog(log: SoarAuditLog): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO soar_audit_logs (
+        id, execution_id, incident_id, action_type,
+        connector_id, target_type, target, actor,
+        event_type, details, timestamp
+      ) VALUES (
+        ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?
+      )
+    `);
+
+    stmt.run(
+      log.id,
+      log.executionId || null,
+      log.incidentId || null,
+      log.actionType,
+      log.connectorId,
+      log.targetType,
+      log.target,
+      log.actor,
+      log.eventType,
+      typeof log.details === "string" ? log.details : safeJsonStringify(log.details || null),
+      log.timestamp || new Date().toISOString()
+    );
+  }
+
+  listSoarAuditLogs(filters: AuditLogFilters = {}): SoarAuditLog[] {
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (filters.executionId) {
+      conditions.push("execution_id = ?");
+      params.push(filters.executionId);
+    }
+    if (filters.incidentId) {
+      conditions.push("incident_id = ?");
+      params.push(filters.incidentId);
+    }
+    if (filters.actionType) {
+      conditions.push("action_type = ?");
+      params.push(filters.actionType);
+    }
+    if (filters.connectorId) {
+      conditions.push("connector_id = ?");
+      params.push(filters.connectorId);
+    }
+
+    let query = "SELECT * FROM soar_audit_logs";
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(" AND ")}`;
+    }
+    query += " ORDER BY timestamp DESC";
+
+    if (filters.limit) {
+      query += " LIMIT ?";
+      params.push(Math.max(1, filters.limit));
+      if (filters.offset) {
+        query += " OFFSET ?";
+        params.push(Math.max(0, filters.offset));
+      }
+    }
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRowToSoarAuditLog(r));
+  }
+
+  // ------------------------------------------
   // ROW MAPPERS
   // ------------------------------------------
 
@@ -1292,6 +1866,116 @@ export class SocDatabase {
       metadata: safeJsonParse<Record<string, unknown> | null>(r.metadata as string, null),
       createdAt: String(r.created_at),
       updatedAt: String(r.updated_at)
+    };
+  }
+
+  private mapRowToDetectionStrategy(r: Record<string, unknown>): DetectionStrategy {
+    return {
+      id: String(r.id),
+      name: String(r.name),
+      description: String(r.description),
+      techniqueId: String(r.technique_id),
+      techniqueName: String(r.technique_name),
+      tactic: String(r.tactic),
+      attackVersion: String(r.attack_version || "v15.1"),
+      analyticConditions: safeJsonParse<string[]>(r.analytic_conditions as string, []),
+      requiredTelemetry: safeJsonParse<string[]>(r.required_telemetry as string, []),
+      supportedPlatforms: safeJsonParse<string[]>(r.supported_platforms as string, ["Windows", "Linux"]),
+      severity: String(r.severity) as DetectionStrategy["severity"],
+      confidenceModel: safeJsonParse<DetectionStrategy["confidenceModel"]>(
+        r.confidence_model as string,
+        { baseConfidence: "HIGH", minEvidenceCount: 1 }
+      ),
+      evidenceRequirements: safeJsonParse<string[]>(r.evidence_requirements as string, []),
+      isActive: Boolean(r.is_active),
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at)
+    };
+  }
+
+  private mapRowToCorrelation(r: Record<string, unknown>): CorrelationRecord {
+    return {
+      id: String(r.id),
+      strategyId: String(r.strategy_id),
+      analyticId: String(r.analytic_id),
+      strategyName: r.strategy_name ? String(r.strategy_name) : undefined,
+      matchedEventIds: safeJsonParse<string[]>(r.matched_event_ids as string, []),
+      matchedAlertIds: safeJsonParse<string[]>(r.matched_alert_ids as string, []),
+      iocIds: safeJsonParse<string[]>(r.ioc_ids as string, []),
+      incidentId: r.incident_id ? String(r.incident_id) : undefined,
+      severity: String(r.severity) as CorrelationRecord["severity"],
+      confidence: String(r.confidence) as CorrelationRecord["confidence"],
+      riskScore: Number(r.risk_score || 0),
+      contributors: safeJsonParse<RiskContributor[]>(r.contributors as string, []),
+      evidence: safeJsonParse<CorrelationEvidence>(r.evidence as string, {
+        eventIds: [],
+        alertIds: [],
+        iocIds: [],
+        timestamps: [],
+        hosts: [],
+        users: [],
+        sourceIps: []
+      }),
+      explanation: String(r.explanation || ""),
+      fingerprint: String(r.fingerprint),
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at)
+    };
+  }
+
+  private mapRowToPlaybook(r: Record<string, unknown>): SoarPlaybook {
+    return {
+      id: String(r.id),
+      name: String(r.name),
+      description: String(r.description),
+      version: String(r.version || "1.0.0"),
+      status: String(r.status) as SoarPlaybook["status"],
+      triggerType: String(r.trigger_type) as SoarPlaybook["triggerType"],
+      triggerConditions: safeJsonParse<Record<string, unknown>>(r.trigger_conditions as string, {}),
+      policy: safeJsonParse<SoarPlaybook["policy"]>(r.policy as string, { requiresApproval: true }),
+      actions: safeJsonParse<SoarPlaybook["actions"]>(r.actions as string, []),
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at)
+    };
+  }
+
+  private mapRowToPlaybookExecution(r: Record<string, unknown>): SoarPlaybookExecution {
+    return {
+      id: String(r.id),
+      playbookId: String(r.playbook_id),
+      playbookName: String(r.playbook_name),
+      playbookVersion: String(r.playbook_version || "1.0.0"),
+      incidentId: r.incident_id ? String(r.incident_id) : undefined,
+      alertId: r.alert_id ? String(r.alert_id) : undefined,
+      correlationId: r.correlation_id ? String(r.correlation_id) : undefined,
+      initiatingUser: String(r.initiating_user),
+      status: String(r.status) as SoarPlaybookExecution["status"],
+      approvedBy: r.approved_by ? String(r.approved_by) : undefined,
+      approvedAt: r.approved_at ? String(r.approved_at) : undefined,
+      rejectionReason: r.rejection_reason ? String(r.rejection_reason) : undefined,
+      currentStepIndex: Number(r.current_step_index || 0),
+      totalSteps: Number(r.total_steps || 0),
+      stepsState: safeJsonParse<PlaybookStepState[]>(r.steps_state as string, []),
+      idempotencyKey: String(r.idempotency_key),
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at),
+      completedAt: r.completed_at ? String(r.completed_at) : undefined
+    };
+  }
+
+  private mapRowToSoarAuditLog(r: Record<string, unknown>): SoarAuditLog {
+    return {
+      id: String(r.id),
+      executionId: r.execution_id ? String(r.execution_id) : undefined,
+      incidentId: r.incident_id ? String(r.incident_id) : undefined,
+      actionType: String(r.action_type),
+      connectorId: String(r.connector_id),
+      targetType: String(r.target_type),
+      target: String(r.target),
+      actor: String(r.actor),
+      eventType: String(r.event_type) as SoarAuditLog["eventType"],
+      details: safeJsonParse<Record<string, unknown> | string>(r.details as string, String(r.details || "")),
+      timestamp: String(r.timestamp)
     };
   }
 }

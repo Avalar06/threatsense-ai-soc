@@ -34,6 +34,8 @@ export const Sidebar: React.FC = () => {
     alerts,
     incidents,
     iocs,
+    correlations,
+    soarExecutions,
     incidentReports,
     activeScenarioId,
     loadScenario,
@@ -44,6 +46,7 @@ export const Sidebar: React.FC = () => {
   const activeIncidentsCount = incidents.filter(
     (i) => i.status === "NEW" || i.status === "OPEN" || i.status === "INVESTIGATING"
   ).length;
+  const pendingApprovalsCount = soarExecutions.filter((e) => e.status === "APPROVAL_REQUIRED").length;
 
   const navItems: NavItem[] = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -60,6 +63,20 @@ export const Sidebar: React.FC = () => {
       icon: FolderKanban,
       badge: activeIncidentsCount > 0 ? activeIncidentsCount : incidents.length > 0 ? incidents.length : undefined,
       badgeColor: "bg-amber-950 text-amber-300 border border-amber-700/60",
+    },
+    {
+      id: "correlations",
+      label: "Detection & Correlation",
+      icon: Layers,
+      badge: correlations.length > 0 ? correlations.length : undefined,
+      badgeColor: "bg-indigo-950 text-indigo-300 border border-indigo-700/60",
+    },
+    {
+      id: "soar",
+      label: "SOAR Orchestration",
+      icon: Zap,
+      badge: pendingApprovalsCount > 0 ? `${pendingApprovalsCount} Approval` : undefined,
+      badgeColor: "bg-amber-950 text-amber-300 border border-amber-700/60 animate-pulse",
     },
     { id: "log-analyzer", label: "Log Analyzer", icon: FileCode2 },
     {
@@ -91,6 +108,11 @@ export const Sidebar: React.FC = () => {
       icon: FileText,
       badge: incidentReports.length > 0 ? incidentReports.length : undefined,
       badgeColor: "bg-emerald-950 text-emerald-300 border border-emerald-700/60",
+    },
+    {
+      id: "benchmarks",
+      label: "Observability & Benchmarks",
+      icon: Activity,
     },
     { id: "settings", label: "Settings", icon: Settings },
   ];

@@ -582,7 +582,8 @@ export function runDetectionEngine(events: SecurityEvent[], rules = DEFAULT_DETE
       (e) =>
         e.raw.toLowerCase().includes("dumplsass") ||
         e.raw.toLowerCase().includes("mimi.dll") ||
-        e.raw.toLowerCase().includes("mimikatz")
+        e.raw.toLowerCase().includes("mimikatz") ||
+        (e.raw.toLowerCase().includes("lsass") && (e.raw.toLowerCase().includes("dump") || e.process?.toLowerCase().includes("procdump")))
     );
 
     if (lsassEvents.length > 0) {
@@ -628,6 +629,11 @@ export function runDetectionEngine(events: SecurityEvent[], rules = DEFAULT_DETE
   }
 
   return alerts;
+}
+
+export function analyzeSecurityEvent(event: SecurityEvent): Alert | null {
+  const alerts = runDetectionEngine([event]);
+  return alerts.length > 0 ? alerts[0] : null;
 }
 
 function checkIsOffHours(timestampStr: string): boolean {

@@ -5,6 +5,9 @@ import { SocDatabase } from "./db/database.js";
 import { parseRawLogs } from "../src/services/logParser.js";
 import { runDetectionEngine } from "../src/services/detectionEngine.js";
 import { enrichmentService } from "./services/iocEnrichmentService.js";
+import { ProductionCorrelationEngine } from "./services/correlationEngine.js";
+import { ProductionSoarEngine } from "./services/soarEngine.js";
+import { ProductionBenchmarkService } from "./services/benchmarkService.js";
 import type {
   Alert,
   SecurityEvent,
@@ -17,6 +20,11 @@ import type {
   TimelineEvent,
   MitreTechnique,
   GeminiInvestigationResult,
+  DetectionStrategy,
+  CorrelationRecord,
+  SoarPlaybook,
+  SoarPlaybookExecution,
+  SoarAuditLog
 } from "../src/types/soc.js";
 import { VALID_ACTION_TARGET_MAP } from "../src/types/soc.js";
 
@@ -2090,5 +2098,416 @@ apiRouter.post("/iocs/:id/enrich", async (req: Request, res: Response) => {
     return sendError(res, 500, "INTERNAL_ERROR", "Failed to enrich IOC");
   }
 });
+
+// =========================================================================
+// PHASE 6: DETECTION STRATEGIES & CORRELATIONS ENDPOINTS
+// =========================================================================
+
+const handleGetStrategies = (req: Request, res: Response) => {
+  try {
+    const { tactic, techniqueId, isActive, search } = req.query;
+    const strategies = getSocDatabase().listDetectionStrategies({
+      tactic: tactic as string,
+      techniqueId: techniqueId as string,
+      isActive: isActive !== undefined ? isActive === "true" : undefined,
+      search: search as string
+    });
+    return res.json({ success: true, count: strategies.length, data: strategies });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to list detection strategies");
+  }
+};
+apiRouter.get("/detection-strategies", handleGetStrategies);
+apiRouter.get("/api/detection-strategies", handleGetStrategies);
+
+const handleGetStrategyById = (req: Request, res: Response) => {
+  try {
+    const strategy = getSocDatabase().getDetectionStrategyById(req.params.id);
+    if (!strategy) {
+      return sendError(res, 404, "NOT_FOUND", `Strategy '${req.params.id}' not found`);
+    }
+    return res.json({ success: true, data: strategy });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to get detection strategy");
+  }
+};
+apiRouter.get("/detection-strategies/:id", handleGetStrategyById);
+apiRouter.get("/api/detection-strategies/:id", handleGetStrategyById);
+
+const handleGetCorrelations = (req: Request, res: Response) => {
+  try {
+    const { strategyId, severity, confidence, incidentId, search, limit, offset } = req.query;
+    const result = getSocDatabase().listCorrelations({
+      strategyId: strategyId as string,
+      severity: severity as string,
+      confidence: confidence as string,
+      incidentId: incidentId as string,
+      search: search as string,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined
+    });
+    return res.json({ success: true, ...result });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to list correlations");
+  }
+};
+apiRouter.get("/correlations", handleGetCorrelations);
+apiRouter.get("/api/correlations", handleGetCorrelations);
+
+const handleGetCorrelationById = (req: Request, res: Response) => {
+  try {
+    const correlation = getSocDatabase().getCorrelationById(req.params.id);
+    if (!correlation) {
+      return sendError(res, 404, "NOT_FOUND", `Correlation '${req.params.id}' not found`);
+    }
+    return res.json({ success: true, data: correlation });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to get correlation");
+  }
+};
+apiRouter.get("/correlations/:id", handleGetCorrelationById);
+apiRouter.get("/api/correlations/:id", handleGetCorrelationById);
+
+const handleRunCorrelations = async (req: Request, res: Response) => {
+  try {
+    const { windowSeconds, strategyIds, incidentId } = req.body || {};
+    const engine = new ProductionCorrelationEngine(getSocDatabase());
+    const result = await engine.evaluateAll({
+      windowSeconds: windowSeconds ? Number(windowSeconds) : 900,
+      strategyIds,
+      incidentId
+    });
+    return res.json({ success: true, ...result });
+  } catch (err: any) {
+    return sendError(res, 500, "INTERNAL_ERROR", `Failed running correlation evaluation: ${err.message || String(err)}`);
+  }
+};
+apiRouter.post("/correlations/run", handleRunCorrelations);
+apiRouter.post("/api/correlations/run", handleRunCorrelations);
+
+// =========================================================================
+// PHASE 7: SOAR PLAYBOOKS & ORCHESTRATION ENDPOINTS
+// =========================================================================
+
+const handleGetConnectors = async (req: Request, res: Response) => {
+  try {
+    const engine = new ProductionSoarEngine(getSocDatabase());
+    const connectors = await engine.listConnectors();
+    return res.json({ success: true, count: connectors.length, data: connectors });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to list SOAR connectors");
+  }
+};
+apiRouter.get("/soar-connectors", handleGetConnectors);
+apiRouter.get("/api/soar-connectors", handleGetConnectors);
+
+const handleGetPlaybooks = (req: Request, res: Response) => {
+  try {
+    const { status } = req.query;
+    const playbooks = getSocDatabase().listPlaybooks(status as string);
+    return res.json({ success: true, count: playbooks.length, data: playbooks });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to list SOAR playbooks");
+  }
+};
+apiRouter.get("/playbooks", handleGetPlaybooks);
+apiRouter.get("/api/playbooks", handleGetPlaybooks);
+
+const handleGetPlaybookById = (req: Request, res: Response) => {
+  try {
+    const playbook = getSocDatabase().getPlaybookById(req.params.id);
+    if (!playbook) {
+      return sendError(res, 404, "NOT_FOUND", `Playbook '${req.params.id}' not found`);
+    }
+    return res.json({ success: true, data: playbook });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to get playbook");
+  }
+};
+apiRouter.get("/playbooks/:id", handleGetPlaybookById);
+apiRouter.get("/api/playbooks/:id", handleGetPlaybookById);
+
+const handleCreatePlaybook = (req: Request, res: Response) => {
+  try {
+    const { name, description, version, status, triggerType, triggerConditions, policy, actions } = req.body;
+    if (!name || !description || !actions || !Array.isArray(actions)) {
+      return sendError(res, 400, "VALIDATION_ERROR", "Playbook name, description, and actions array are required");
+    }
+
+    const id = `PLAYBOOK-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`;
+    const now = new Date().toISOString();
+    const playbook: SoarPlaybook = {
+      id,
+      name,
+      description,
+      version: version || "1.0.0",
+      status: status || "ENABLED",
+      triggerType: triggerType || "ALERT",
+      triggerConditions: triggerConditions || {},
+      policy: policy || { requiresApproval: true },
+      actions,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    getSocDatabase().insertPlaybook(playbook);
+    return res.status(201).json({ success: true, data: playbook });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to create playbook");
+  }
+};
+apiRouter.post("/playbooks", handleCreatePlaybook);
+apiRouter.post("/api/playbooks", handleCreatePlaybook);
+
+const handleUpdatePlaybook = (req: Request, res: Response) => {
+  try {
+    const updated = getSocDatabase().updatePlaybook(req.params.id, req.body);
+    if (!updated) {
+      return sendError(res, 404, "NOT_FOUND", `Playbook '${req.params.id}' not found`);
+    }
+    return res.json({ success: true, data: updated });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to update playbook");
+  }
+};
+apiRouter.patch("/playbooks/:id", handleUpdatePlaybook);
+apiRouter.patch("/api/playbooks/:id", handleUpdatePlaybook);
+
+const handleRunPlaybook = async (req: Request, res: Response) => {
+  try {
+    const playbookId = req.params.id;
+    const { initiatingUser, incidentId, alertId, correlationId, idempotencyKey, autoApprove } = req.body || {};
+
+    if (!initiatingUser) {
+      return sendError(res, 400, "VALIDATION_ERROR", "initiatingUser is required to run a playbook");
+    }
+
+    const engine = new ProductionSoarEngine(getSocDatabase());
+    const execution = await engine.runPlaybook({
+      playbookId,
+      initiatingUser,
+      incidentId,
+      alertId,
+      correlationId,
+      idempotencyKey,
+      autoApprove: Boolean(autoApprove)
+    });
+
+    return res.json({ success: true, data: execution });
+  } catch (err: any) {
+    return sendError(res, 400, "EXECUTION_ERROR", err.message || "Failed to execute playbook");
+  }
+};
+apiRouter.post("/playbooks/:id/run", handleRunPlaybook);
+apiRouter.post("/api/playbooks/:id/run", handleRunPlaybook);
+
+const handleListExecutions = (req: Request, res: Response) => {
+  try {
+    const { playbookId, status, incidentId, alertId, correlationId, limit, offset } = req.query;
+    const result = getSocDatabase().listPlaybookExecutions({
+      playbookId: playbookId as string,
+      status: status as string,
+      incidentId: incidentId as string,
+      alertId: alertId as string,
+      correlationId: correlationId as string,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined
+    });
+    return res.json({ success: true, ...result });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to list playbook executions");
+  }
+};
+apiRouter.get("/playbook-executions", handleListExecutions);
+apiRouter.get("/api/playbook-executions", handleListExecutions);
+
+const handleGetExecutionById = (req: Request, res: Response) => {
+  try {
+    const execution = getSocDatabase().getPlaybookExecutionById(req.params.id);
+    if (!execution) {
+      return sendError(res, 404, "NOT_FOUND", `Execution '${req.params.id}' not found`);
+    }
+    return res.json({ success: true, data: execution });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to get playbook execution");
+  }
+};
+apiRouter.get("/playbook-executions/:id", handleGetExecutionById);
+apiRouter.get("/api/playbook-executions/:id", handleGetExecutionById);
+
+const handleApproveExecution = async (req: Request, res: Response) => {
+  try {
+    const { approvedBy } = req.body || {};
+    if (!approvedBy) {
+      return sendError(res, 400, "VALIDATION_ERROR", "approvedBy analyst name is required to approve execution");
+    }
+
+    const engine = new ProductionSoarEngine(getSocDatabase());
+    const execution = await engine.approveExecution(req.params.id, approvedBy);
+    return res.json({ success: true, data: execution });
+  } catch (err: any) {
+    return sendError(res, 400, "APPROVAL_ERROR", err.message || "Failed to approve execution");
+  }
+};
+apiRouter.post("/playbook-executions/:id/approve", handleApproveExecution);
+apiRouter.post("/api/playbook-executions/:id/approve", handleApproveExecution);
+
+const handleRejectExecution = async (req: Request, res: Response) => {
+  try {
+    const { actor, reason } = req.body || {};
+    if (!actor || !reason) {
+      return sendError(res, 400, "VALIDATION_ERROR", "actor and reason are required to reject execution");
+    }
+
+    const engine = new ProductionSoarEngine(getSocDatabase());
+    const execution = await engine.rejectExecution(req.params.id, actor, reason);
+    return res.json({ success: true, data: execution });
+  } catch (err: any) {
+    return sendError(res, 400, "REJECTION_ERROR", err.message || "Failed to reject execution");
+  }
+};
+apiRouter.post("/playbook-executions/:id/reject", handleRejectExecution);
+apiRouter.post("/api/playbook-executions/:id/reject", handleRejectExecution);
+
+const handleCancelExecution = async (req: Request, res: Response) => {
+  try {
+    const { actor, reason } = req.body || {};
+    const engine = new ProductionSoarEngine(getSocDatabase());
+    const execution = await engine.cancelExecution(req.params.id, actor || "Analyst", reason);
+    return res.json({ success: true, data: execution });
+  } catch (err: any) {
+    return sendError(res, 400, "CANCEL_ERROR", err.message || "Failed to cancel execution");
+  }
+};
+apiRouter.post("/playbook-executions/:id/cancel", handleCancelExecution);
+apiRouter.post("/api/playbook-executions/:id/cancel", handleCancelExecution);
+
+const handleGetAuditLogs = (req: Request, res: Response) => {
+  try {
+    const { executionId, incidentId, actionType, connectorId, limit, offset } = req.query;
+    const logs = getSocDatabase().listSoarAuditLogs({
+      executionId: executionId as string,
+      incidentId: incidentId as string,
+      actionType: actionType as string,
+      connectorId: connectorId as string,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined
+    });
+    return res.json({ success: true, count: logs.length, data: logs });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to list SOAR audit logs");
+  }
+};
+apiRouter.get("/soar-audit-logs", handleGetAuditLogs);
+apiRouter.get("/api/soar-audit-logs", handleGetAuditLogs);
+
+// =========================================================================
+// OBSERVABILITY & BENCHMARKING ENDPOINTS
+// =========================================================================
+
+const handleGetMetrics = (req: Request, res: Response) => {
+  try {
+    const metrics = ProductionBenchmarkService.getLiveMetrics(getSocDatabase());
+    return res.json({ success: true, data: metrics });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve SOC observability metrics");
+  }
+};
+apiRouter.get("/metrics", handleGetMetrics);
+apiRouter.get("/api/metrics", handleGetMetrics);
+
+const handleRunBenchmarks = async (req: Request, res: Response) => {
+  try {
+    const result = await ProductionBenchmarkService.runIsolatedBenchmark();
+    return res.json({ success: true, data: result });
+  } catch (err: any) {
+    return sendError(res, 500, "INTERNAL_ERROR", `Failed running isolated benchmark: ${err.message || String(err)}`);
+  }
+};
+const handleGetBenchmarkAdapters = (req: Request, res: Response) => {
+  try {
+    const adapters = ProductionBenchmarkService.listAdapters();
+    return res.json({ success: true, count: adapters.length, data: adapters });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to list dataset adapters");
+  }
+};
+apiRouter.get("/benchmarks/adapters", handleGetBenchmarkAdapters);
+apiRouter.get("/api/benchmarks/adapters", handleGetBenchmarkAdapters);
+
+const handleEvaluateBenchmark = async (req: Request, res: Response) => {
+  try {
+    const { adapterId, samples, meta } = req.body || {};
+
+    if (adapterId) {
+      if (adapterId === "ADAPTER-INTERNAL-VAL") {
+        const result = await ProductionBenchmarkService.runIsolatedBenchmark();
+        return res.json({ success: true, data: result });
+      }
+
+      const adapters = ProductionBenchmarkService.listAdapters();
+      const matched = adapters.find((a) => a.adapterId === adapterId);
+      if (!matched) {
+        return sendError(res, 404, "NOT_FOUND", `Unknown dataset adapter: ${adapterId}`);
+      }
+
+      if (matched.status === "EXTERNAL_DATASET_NOT_AVAILABLE") {
+        return res.status(404).json({
+          success: false,
+          error: {
+            code: "EXTERNAL_DATASET_NOT_AVAILABLE",
+            message: `External dataset for adapter '${matched.datasetName}' (${matched.datasetVersion}) is not available locally. ${matched.ingestionInstructions || ""}`,
+            details: {
+              adapter: matched
+            }
+          }
+        });
+      }
+    }
+
+    if (!samples || !Array.isArray(samples) || samples.length === 0) {
+      return sendError(res, 400, "VALIDATION_ERROR", "samples array is required with at least 1 labeled sample");
+    }
+
+    const evaluationMeta = {
+      datasetName: meta?.datasetName || "Custom Labeled Evaluation Dataset",
+      datasetSource: meta?.datasetSource || "External Researcher Submission",
+      datasetVersion: meta?.datasetVersion || "v1.0",
+      datasetHash: meta?.datasetHash,
+      evaluationType: (meta?.evaluationType === "INTERNAL_VALIDATION" ? "INTERNAL_VALIDATION" : "EXTERNAL_BENCHMARK") as "INTERNAL_VALIDATION" | "EXTERNAL_BENCHMARK",
+      limitations: meta?.limitations
+    };
+
+    const result = await ProductionBenchmarkService.evaluateDataset(samples, evaluationMeta);
+    return res.json({ success: true, data: result });
+  } catch (err: any) {
+    return sendError(res, 500, "INTERNAL_ERROR", `Failed evaluating dataset: ${err.message || String(err)}`);
+  }
+};
+apiRouter.post("/benchmarks/evaluate", handleEvaluateBenchmark);
+apiRouter.post("/api/benchmarks/evaluate", handleEvaluateBenchmark);
+
+const handleExportBenchmark = (req: Request, res: Response) => {
+  try {
+    const { result, format = "json" } = req.body || {};
+    if (!result || !result.benchmarkId) {
+      return sendError(res, 400, "VALIDATION_ERROR", "result object with benchmarkId is required for export");
+    }
+
+    const validFormats = ["json", "csv", "markdown"];
+    if (!validFormats.includes(format)) {
+      return sendError(res, 400, "VALIDATION_ERROR", `Invalid export format. Supported formats: ${validFormats.join(", ")}`);
+    }
+
+    const exportPayload = ProductionBenchmarkService.exportBenchmarkResult(result, format as any);
+    res.setHeader("Content-Type", exportPayload.contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${exportPayload.filename}"`);
+    return res.send(exportPayload.content);
+  } catch (err: any) {
+    return sendError(res, 500, "INTERNAL_ERROR", `Failed exporting benchmark result: ${err.message || String(err)}`);
+  }
+};
+apiRouter.post("/benchmarks/export", handleExportBenchmark);
+apiRouter.post("/api/benchmarks/export", handleExportBenchmark);
 
 

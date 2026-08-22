@@ -8,6 +8,7 @@ const tests = [
   "tests/unit/logParser.test.ts",
   "tests/unit/iocExtractor.test.ts",
   "tests/unit/detectionEngine.test.ts",
+  "tests/unit/benchmarkEvaluation.test.ts",
   "tests/integration/apiEndpoints.test.ts",
   "tests/integration/database.test.ts",
   "tests/integration/phase3Persistence.test.ts",

@@ -14,6 +14,7 @@ export interface SecurityEvent {
   username: string;
   hostname: string;
   process?: string;
+  command_line?: string;
   event_type: string; // AUTH_FAILURE, AUTH_SUCCESS, PROCESS_CREATE, NETWORK_CONNECT, PRIVILEGE_ESCALATE, FILE_MOD, HTTP_REQUEST, etc.
   action: "ALLOW" | "BLOCK" | "EXECUTE" | "LOGIN_FAIL" | "LOGIN_SUCCESS" | "ESCALATE" | "QUERY" | "UNKNOWN";
   status: "SUCCESS" | "FAILURE" | "ANOMALOUS" | "FLAGGED";
@@ -295,3 +296,328 @@ export interface Incident {
   alerts?: Alert[];
   reports?: IncidentReport[];
 }
+
+// ==========================================
+// PHASE 6: DETECTION STRATEGY & CORRELATION
+// ==========================================
+
+export type CorrelationConfidence = "HIGH" | "MEDIUM" | "LOW" | "INSUFFICIENT";
+
+export interface DetectionStrategy {
+  id: string;
+  name: string;
+  description: string;
+  techniqueId: string;
+  techniqueName: string;
+  tactic: string;
+  attackVersion: string;
+  analyticConditions: string[];
+  requiredTelemetry: string[];
+  supportedPlatforms: string[];
+  severity: Severity;
+  confidenceModel: {
+    baseConfidence: CorrelationConfidence;
+    minEvidenceCount: number;
+    evidenceWeights?: Record<string, number>;
+  };
+  evidenceRequirements: string[];
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RiskContributor {
+  factor: string;
+  contribution: number;
+}
+
+export interface CorrelationEvidence {
+  eventIds: string[];
+  alertIds: string[];
+  iocIds: string[];
+  timestamps: string[];
+  hosts: string[];
+  users: string[];
+  sourceIps: string[];
+  destinationIps?: string[];
+  details?: Record<string, unknown>;
+}
+
+export interface CorrelationRecord {
+  id: string;
+  strategyId: string;
+  analyticId: string;
+  strategyName?: string;
+  matchedEventIds: string[];
+  matchedAlertIds: string[];
+  iocIds?: string[];
+  incidentId?: string;
+  severity: Severity;
+  confidence: CorrelationConfidence;
+  riskScore: number; // 0 - 100
+  contributors: RiskContributor[];
+  evidence: CorrelationEvidence;
+  explanation: string;
+  fingerprint: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ==========================================
+// PHASE 7: SOAR ORCHESTRATION & CONNECTORS
+// ==========================================
+
+export type SoarConnectorStatus = "CONFIGURED" | "NOT_CONFIGURED" | "HEALTHY" | "UNHEALTHY";
+
+export type SoarConnectorCategory =
+  | "EDR"
+  | "SIEM"
+  | "FIREWALL"
+  | "IDENTITY"
+  | "CLOUD"
+  | "EMAIL"
+  | "NETWORK"
+  | "GENERIC";
+
+export interface SoarConnectorInfo {
+  id: string;
+  name: string;
+  category: SoarConnectorCategory;
+  status: SoarConnectorStatus;
+  capabilities: ResponseActionType[];
+  healthMessage?: string;
+  supportsRollback: boolean;
+  supportsVerification: boolean;
+  lastCheckedAt?: string;
+}
+
+export type PlaybookStatus = "DRAFT" | "ENABLED" | "DISABLED";
+
+export type PlaybookTriggerType = "ALERT" | "CORRELATION" | "INCIDENT" | "MANUAL";
+
+export type PlaybookExecutionStatus =
+  | "PENDING"
+  | "APPROVAL_REQUIRED"
+  | "APPROVED"
+  | "EXECUTING"
+  | "SUCCEEDED"
+  | "FAILED"
+  | "TIMED_OUT"
+  | "CANCELLED"
+  | "VERIFYING";
+
+export interface PlaybookActionDefinition {
+  stepId: string;
+  name: string;
+  actionType: ResponseActionType;
+  connectorCategory: SoarConnectorCategory;
+  targetExpression: string; // e.g. "{{host}}", "{{sourceIp}}", "{{username}}"
+  timeoutMs?: number;
+  retryLimit?: number;
+  requireVerification?: boolean;
+  rollbackAction?: ResponseActionType;
+}
+
+export interface PlaybookPolicy {
+  requiresApproval: boolean;
+  minSeverity?: Severity;
+  allowedRoles?: string[];
+  autoExecuteIfConfidence?: CorrelationConfidence;
+}
+
+export interface SoarPlaybook {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  status: PlaybookStatus;
+  triggerType: PlaybookTriggerType;
+  triggerConditions: Record<string, unknown>;
+  policy: PlaybookPolicy;
+  actions: PlaybookActionDefinition[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlaybookStepState {
+  stepId: string;
+  actionType: ResponseActionType;
+  target: string;
+  targetType: ResponseTargetType;
+  status: PlaybookExecutionStatus;
+  connectorId?: string;
+  providerRequestId?: string;
+  providerResponse?: Record<string, unknown>;
+  verificationResult?: {
+    verified: boolean;
+    message: string;
+    timestamp: string;
+  };
+  retryCount: number;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface SoarPlaybookExecution {
+  id: string;
+  playbookId: string;
+  playbookName: string;
+  playbookVersion: string;
+  incidentId?: string;
+  alertId?: string;
+  correlationId?: string;
+  initiatingUser: string;
+  status: PlaybookExecutionStatus;
+  approvedBy?: string;
+  approvedAt?: string;
+  rejectionReason?: string;
+  currentStepIndex: number;
+  totalSteps: number;
+  stepsState: PlaybookStepState[];
+  idempotencyKey: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface SoarAuditLog {
+  id: string;
+  executionId?: string;
+  incidentId?: string;
+  actionType: string;
+  connectorId: string;
+  targetType: string;
+  target: string;
+  actor: string;
+  eventType:
+    | "APPROVAL_REQUESTED"
+    | "APPROVED"
+    | "REJECTED"
+    | "EXECUTION_STARTED"
+    | "EXECUTION_SUCCEEDED"
+    | "EXECUTION_FAILED"
+    | "VERIFIED"
+    | "VERIFICATION_FAILED"
+    | "ROLLBACK_STARTED"
+    | "ROLLBACK_SUCCEEDED"
+    | "ROLLBACK_FAILED"
+    | "CANCELLED";
+  details?: Record<string, unknown> | string;
+  timestamp: string;
+}
+
+// ==========================================
+// OBSERVABILITY & BENCHMARKS
+// ==========================================
+
+export interface SocMetrics {
+  ingestion: {
+    totalEvents: number;
+    rejectedEvents: number;
+    avgLatencyMs: number;
+  };
+  detection: {
+    totalDetections: number;
+    avgLatencyMs: number;
+  };
+  correlation: {
+    totalCorrelations: number;
+    avgLatencyMs: number;
+    insufficientTelemetryCount: number;
+  };
+  soar: {
+    totalExecutions: number;
+    successfulExecutions: number;
+    failedExecutions: number;
+    pendingApprovals: number;
+    avgExecutionLatencyMs: number;
+  };
+  threatIntel: {
+    totalLookups: number;
+    cacheHits: number;
+    providerFailures: number;
+  };
+}
+
+export interface PerClassBenchmarkMetric {
+  attackClass: string;
+  totalSamples: number;
+  truePositives: number;
+  falseNegatives: number;
+  recall: number;
+  detectionRate: number;
+}
+
+export interface BenchmarkLatencyDistribution {
+  meanMs: number;
+  medianMs: number;
+  p95Ms: number;
+  p99Ms: number;
+}
+
+export interface DatasetAdapterMetadata {
+  adapterId: string;
+  datasetName: string;
+  officialSource: string;
+  referenceUrl: string;
+  datasetVersion: string;
+  license?: string;
+  status: "AVAILABLE" | "EXTERNAL_DATASET_NOT_AVAILABLE";
+  sampleCount: number;
+  maliciousCount: number;
+  benignCount: number;
+  labelSchema: string;
+  preprocessingVersion: string;
+  ingestionInstructions?: string;
+  expectedFormat?: string;
+}
+
+export interface NormalizedBenchmarkRecord {
+  sourceRecordId: string;
+  sourceDataset: string;
+  originalLabel: string;
+  normalizedLabel: "ATTACK" | "BENIGN";
+  attackClass?: string;
+  expectedTechnique?: string;
+  event: SecurityEvent;
+}
+
+export interface BenchmarkResult {
+  benchmarkId: string;
+  datasetName: string;
+  datasetSource?: string;
+  datasetVersion: string;
+  datasetHash?: string;
+  evaluationType: "INTERNAL_VALIDATION" | "EXTERNAL_BENCHMARK";
+  rulesetVersion?: string;
+  environment?: string;
+  totalEventsEvaluated: number;
+  attackEventsCount: number;
+  normalEventsCount: number;
+  truePositives: number;
+  falsePositives: number;
+  trueNegatives: number;
+  falseNegatives: number;
+  precision: number;
+  recall: number;
+  f1Score: number;
+  accuracy: number;
+  falsePositiveRate: number;
+  falseNegativeRate: number;
+  throughputEventsPerSecond: number;
+  meanDetectionLatencyMs: number;
+  meanCorrelationLatencyMs: number;
+  latencyDistribution: BenchmarkLatencyDistribution;
+  perClassMetrics: PerClassBenchmarkMetric[];
+  correlationEvaluation: "NOT_AVAILABLE" | "EVALUATED" | "INSUFFICIENT_ATTACK_CHAINS";
+  correlationCandidateCount?: number;
+  confirmedCorrelationsCount?: number;
+  measuredAt: string;
+  memoryUsageMb: number;
+  limitations: string[];
+  researchIntegrityStatement: string;
+}
+
+export type BenchmarkExportFormat = "json" | "csv" | "markdown";
+

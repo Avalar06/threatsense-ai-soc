@@ -24,7 +24,7 @@ export interface EnrichmentResult {
   source?: string;
   summary: string;
   metadata?: Record<string, unknown>;
-  status: "ENRICHED" | "NOT_CONFIGURED" | "UNAVAILABLE" | "FAILED";
+  status: "ENRICHED" | "NOT_CONFIGURED" | "UNAVAILABLE" | "TIMEOUT" | "RATE_LIMITED" | "PROVIDER_ERROR" | "FAILED";
 }
 
 export interface IOCEnrichmentProvider {
@@ -97,7 +97,7 @@ export class ThreatIntelEnrichmentService {
         confidence: 0,
         classification: "UNVERIFIED",
         summary: `Enrichment provider is not configured for ${ioc.type} indicator (${ioc.defangedValue || ioc.value}). External threat intelligence lookups require configuring ABUSEIPDB_API_KEY, VIRUSTOTAL_API_KEY, or OTX_API_KEY in environment variables.`,
-        source: "ThreatSense Engine (Demo Mode)",
+        source: "ThreatSense Engine (Local Unconfigured)",
         metadata: {
           configured: false,
           iocType: ioc.type,
@@ -120,17 +120,41 @@ export class ThreatIntelEnrichmentService {
         reputation: "UNKNOWN",
         threatLevel: "UNKNOWN",
         confidence: 0,
-        summary: `No compatible external provider found for IOC type '${ioc.type}'.`,
+        summary: `No compatible external provider configured for IOC type '${ioc.type}'.`,
         status: "UNAVAILABLE",
       };
     } catch (err: any) {
+      if (err.name === "AbortError" || err.message?.includes("aborted") || err.message?.includes("timeout")) {
+        return {
+          provider: "EXTERNAL_PROVIDER",
+          reputation: "UNKNOWN",
+          threatLevel: "UNKNOWN",
+          confidence: 0,
+          summary: `Threat intelligence provider timed out while querying ${ioc.value}.`,
+          status: "TIMEOUT",
+          metadata: { error: "TIMEOUT" }
+        };
+      }
+
+      if (err.message?.includes("429") || err.message?.toLowerCase().includes("rate limit")) {
+        return {
+          provider: "EXTERNAL_PROVIDER",
+          reputation: "UNKNOWN",
+          threatLevel: "UNKNOWN",
+          confidence: 0,
+          summary: `Threat intelligence provider rate limit exceeded for ${ioc.value}.`,
+          status: "RATE_LIMITED",
+          metadata: { error: "RATE_LIMITED" }
+        };
+      }
+
       return {
         provider: "EXTERNAL_PROVIDER",
         reputation: "UNKNOWN",
         threatLevel: "UNKNOWN",
         confidence: 0,
         summary: `External provider request failed: ${err.message || "Unknown communication error"}`,
-        status: "FAILED",
+        status: "PROVIDER_ERROR",
         metadata: {
           error: String(err.message || err),
         },
@@ -158,6 +182,10 @@ export class ThreatIntelEnrichmentService {
           signal: controller.signal,
         }
       );
+
+      if (res.status === 429) {
+        throw new Error("AbuseIPDB API rate limit exceeded (HTTP 429)");
+      }
 
       if (!res.ok) {
         throw new Error(`AbuseIPDB returned HTTP ${res.status}`);
@@ -243,6 +271,10 @@ export class ThreatIntelEnrichmentService {
         },
         signal: controller.signal,
       });
+
+      if (res.status === 429) {
+        throw new Error("VirusTotal API rate limit exceeded (HTTP 429)");
+      }
 
       if (!res.ok) {
         throw new Error(`VirusTotal returned HTTP ${res.status}`);

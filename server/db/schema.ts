@@ -149,6 +149,103 @@ CREATE TABLE IF NOT EXISTS incident_response_actions (
   FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE
 );
 
+-- Detection Strategies Table (MITRE ATT&CK Model)
+CREATE TABLE IF NOT EXISTS detection_strategies (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  technique_id TEXT NOT NULL,
+  technique_name TEXT NOT NULL,
+  tactic TEXT NOT NULL,
+  attack_version TEXT NOT NULL,
+  analytic_conditions TEXT NOT NULL,
+  required_telemetry TEXT NOT NULL,
+  supported_platforms TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  confidence_model TEXT NOT NULL,
+  evidence_requirements TEXT NOT NULL,
+  is_active INTEGER DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- Correlations Table (Persistent Correlation Matches with Explainable Risk)
+CREATE TABLE IF NOT EXISTS correlations (
+  id TEXT PRIMARY KEY,
+  strategy_id TEXT NOT NULL,
+  analytic_id TEXT NOT NULL,
+  strategy_name TEXT,
+  matched_event_ids TEXT NOT NULL,
+  matched_alert_ids TEXT NOT NULL,
+  ioc_ids TEXT,
+  incident_id TEXT,
+  severity TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  risk_score INTEGER NOT NULL DEFAULT 0,
+  contributors TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  explanation TEXT NOT NULL,
+  fingerprint TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE SET NULL
+);
+
+-- SOAR Playbooks Table
+CREATE TABLE IF NOT EXISTS soar_playbooks (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  version TEXT NOT NULL DEFAULT '1.0.0',
+  status TEXT NOT NULL DEFAULT 'ENABLED',
+  trigger_type TEXT NOT NULL DEFAULT 'ALERT',
+  trigger_conditions TEXT NOT NULL,
+  policy TEXT NOT NULL,
+  actions TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- SOAR Playbook Executions Table
+CREATE TABLE IF NOT EXISTS soar_playbook_executions (
+  id TEXT PRIMARY KEY,
+  playbook_id TEXT NOT NULL,
+  playbook_name TEXT NOT NULL,
+  playbook_version TEXT NOT NULL,
+  incident_id TEXT,
+  alert_id TEXT,
+  correlation_id TEXT,
+  initiating_user TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  approved_by TEXT,
+  approved_at TEXT,
+  rejection_reason TEXT,
+  current_step_index INTEGER DEFAULT 0,
+  total_steps INTEGER DEFAULT 0,
+  steps_state TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  FOREIGN KEY (playbook_id) REFERENCES soar_playbooks(id) ON DELETE CASCADE,
+  FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE SET NULL
+);
+
+-- SOAR Audit Logs Table
+CREATE TABLE IF NOT EXISTS soar_audit_logs (
+  id TEXT PRIMARY KEY,
+  execution_id TEXT,
+  incident_id TEXT,
+  action_type TEXT NOT NULL,
+  connector_id TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  details TEXT,
+  timestamp TEXT NOT NULL
+);
+
 -- Indexes for Fast Querying
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
@@ -181,6 +278,28 @@ CREATE INDEX IF NOT EXISTS idx_actions_incident_id ON incident_response_actions(
 CREATE INDEX IF NOT EXISTS idx_actions_status ON incident_response_actions(status);
 CREATE INDEX IF NOT EXISTS idx_actions_action_type ON incident_response_actions(action_type);
 CREATE INDEX IF NOT EXISTS idx_actions_requested_at ON incident_response_actions(requested_at);
+
+CREATE INDEX IF NOT EXISTS idx_strategies_technique_id ON detection_strategies(technique_id);
+CREATE INDEX IF NOT EXISTS idx_strategies_tactic ON detection_strategies(tactic);
+CREATE INDEX IF NOT EXISTS idx_strategies_is_active ON detection_strategies(is_active);
+
+CREATE INDEX IF NOT EXISTS idx_correlations_strategy_id ON correlations(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_correlations_severity ON correlations(severity);
+CREATE INDEX IF NOT EXISTS idx_correlations_confidence ON correlations(confidence);
+CREATE INDEX IF NOT EXISTS idx_correlations_created_at ON correlations(created_at);
+CREATE INDEX IF NOT EXISTS idx_correlations_incident_id ON correlations(incident_id);
+
+CREATE INDEX IF NOT EXISTS idx_playbooks_status ON soar_playbooks(status);
+CREATE INDEX IF NOT EXISTS idx_playbooks_trigger_type ON soar_playbooks(trigger_type);
+
+CREATE INDEX IF NOT EXISTS idx_executions_playbook_id ON soar_playbook_executions(playbook_id);
+CREATE INDEX IF NOT EXISTS idx_executions_status ON soar_playbook_executions(status);
+CREATE INDEX IF NOT EXISTS idx_executions_created_at ON soar_playbook_executions(created_at);
+CREATE INDEX IF NOT EXISTS idx_executions_incident_id ON soar_playbook_executions(incident_id);
+
+CREATE INDEX IF NOT EXISTS idx_soar_audit_execution_id ON soar_audit_logs(execution_id);
+CREATE INDEX IF NOT EXISTS idx_soar_audit_incident_id ON soar_audit_logs(incident_id);
+CREATE INDEX IF NOT EXISTS idx_soar_audit_timestamp ON soar_audit_logs(timestamp);
 `;
 
 export const REQUIRED_TABLES = [
@@ -190,7 +309,12 @@ export const REQUIRED_TABLES = [
   "incident_reports",
   "ioc_records",
   "ioc_enrichments",
-  "incident_response_actions"
+  "incident_response_actions",
+  "detection_strategies",
+  "correlations",
+  "soar_playbooks",
+  "soar_playbook_executions",
+  "soar_audit_logs"
 ] as const;
 
 export const REQUIRED_INDEXES = [
@@ -218,7 +342,24 @@ export const REQUIRED_INDEXES = [
   "idx_actions_incident_id",
   "idx_actions_status",
   "idx_actions_action_type",
-  "idx_actions_requested_at"
+  "idx_actions_requested_at",
+  "idx_strategies_technique_id",
+  "idx_strategies_tactic",
+  "idx_strategies_is_active",
+  "idx_correlations_strategy_id",
+  "idx_correlations_severity",
+  "idx_correlations_confidence",
+  "idx_correlations_created_at",
+  "idx_correlations_incident_id",
+  "idx_playbooks_status",
+  "idx_playbooks_trigger_type",
+  "idx_executions_playbook_id",
+  "idx_executions_status",
+  "idx_executions_created_at",
+  "idx_executions_incident_id",
+  "idx_soar_audit_execution_id",
+  "idx_soar_audit_incident_id",
+  "idx_soar_audit_timestamp"
 ] as const;
 
 /**

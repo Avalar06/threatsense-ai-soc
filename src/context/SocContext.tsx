@@ -12,6 +12,14 @@ import {
   SecurityEvent,
   Severity,
   TimelineEvent,
+  DetectionStrategy,
+  CorrelationRecord,
+  SoarPlaybook,
+  SoarPlaybookExecution,
+  SoarConnectorInfo,
+  SoarAuditLog,
+  SocMetrics,
+  BenchmarkResult,
 } from "../types/soc.js";
 import { SAMPLE_SCENARIOS } from "../data/sampleLogs.js";
 import { extractIocsFromText } from "../services/iocExtractor.js";
@@ -37,6 +45,19 @@ import {
   updateIncidentAction as apiUpdateIncidentAction,
   getIocs as apiGetIocs,
   enrichIoc as apiEnrichIoc,
+  getDetectionStrategies as apiGetDetectionStrategies,
+  getCorrelations as apiGetCorrelations,
+  runCorrelations as apiRunCorrelations,
+  getSoarConnectors as apiGetSoarConnectors,
+  getPlaybooks as apiGetPlaybooks,
+  runPlaybook as apiRunPlaybook,
+  getPlaybookExecutions as apiGetPlaybookExecutions,
+  approvePlaybookExecution as apiApprovePlaybookExecution,
+  rejectPlaybookExecution as apiRejectPlaybookExecution,
+  cancelPlaybookExecution as apiCancelPlaybookExecution,
+  getSoarAuditLogs as apiGetSoarAuditLogs,
+  getSocMetrics as apiGetSocMetrics,
+  runBenchmark as apiRunBenchmark,
   AlertFilterParams,
   LogFilterParams,
   ReportFilterParams,
@@ -50,6 +71,9 @@ export type SocNavTab =
   | "alerts"
   | "incidents"
   | "log-analyzer"
+  | "correlations"
+  | "soar"
+  | "benchmarks"
   | "investigations"
   | "ioc-extractor"
   | "mitre-attack"
@@ -69,6 +93,15 @@ interface SocContextType {
   incidentActions: IncidentResponseAction[];
   dashboardStats: DashboardStats | null;
   
+  // Phase 6 & 7 State
+  detectionStrategies: DetectionStrategy[];
+  correlations: CorrelationRecord[];
+  soarPlaybooks: SoarPlaybook[];
+  soarExecutions: SoarPlaybookExecution[];
+  soarConnectors: SoarConnectorInfo[];
+  soarAuditLogs: SoarAuditLog[];
+  socMetrics: SocMetrics | null;
+  
   // Loading & Error States
   statsLoading: boolean;
   alertsLoading: boolean;
@@ -77,6 +110,8 @@ interface SocContextType {
   incidentsLoading: boolean;
   actionsLoading: boolean;
   iocsLoading: boolean;
+  correlationsLoading: boolean;
+  soarLoading: boolean;
   isIngesting: boolean;
   statsError: string | null;
   alertsError: string | null;
@@ -85,6 +120,8 @@ interface SocContextType {
   incidentsError: string | null;
   actionsError: string | null;
   iocsError: string | null;
+  correlationsError: string | null;
+  soarError: string | null;
 
   activeAlertId: string | null;
   setActiveAlertId: (id: string | null) => void;
@@ -105,6 +142,19 @@ interface SocContextType {
   loadIncidents: (filters?: IncidentFilterParams) => Promise<void>;
   loadIncidentActions: (incidentId: string) => Promise<void>;
   loadIocs: (filters?: IocFilterParams) => Promise<void>;
+  loadDetectionStrategies: () => Promise<void>;
+  loadCorrelations: (filters?: { strategyId?: string; severity?: string; incidentId?: string; search?: string }) => Promise<void>;
+  triggerCorrelationsRun: (options?: { windowSeconds?: number; strategyIds?: string[]; incidentId?: string }) => Promise<{ correlations: CorrelationRecord[]; explanations: string[] }>;
+  loadSoarConnectors: () => Promise<void>;
+  loadPlaybooks: (status?: string) => Promise<void>;
+  loadPlaybookExecutions: (filters?: { playbookId?: string; status?: string; incidentId?: string }) => Promise<void>;
+  loadSoarAuditLogs: (filters?: { executionId?: string; incidentId?: string }) => Promise<void>;
+  loadSocMetrics: () => Promise<void>;
+  runBenchmarkSuite: () => Promise<BenchmarkResult>;
+  executePlaybook: (playbookId: string, options: { initiatingUser: string; incidentId?: string; alertId?: string; autoApprove?: boolean }) => Promise<SoarPlaybookExecution>;
+  approveExecution: (executionId: string, approvedBy: string) => Promise<SoarPlaybookExecution>;
+  rejectExecution: (executionId: string, actor: string, reason: string) => Promise<SoarPlaybookExecution>;
+  cancelExecution: (executionId: string, actor: string, reason?: string) => Promise<SoarPlaybookExecution>;
   loadScenario: (scenarioId: string) => Promise<void>;
   ingestLogs: (rawLogText: string, defaultHost?: string) => Promise<{ eventsIngested: number; alertsGenerated: number }>;
   triggerAlertInvestigation: (alertId: string, customNotes?: string) => Promise<GeminiInvestigationResult | null>;
@@ -155,6 +205,19 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [incidentsError, setIncidentsError] = useState<string | null>(null);
   const [actionsError, setActionsError] = useState<string | null>(null);
   const [iocsError, setIocsError] = useState<string | null>(null);
+  const [correlationsError, setCorrelationsError] = useState<string | null>(null);
+  const [soarError, setSoarError] = useState<string | null>(null);
+
+  // Phase 6 & 7 States
+  const [detectionStrategies, setDetectionStrategies] = useState<DetectionStrategy[]>([]);
+  const [correlations, setCorrelations] = useState<CorrelationRecord[]>([]);
+  const [soarPlaybooks, setSoarPlaybooks] = useState<SoarPlaybook[]>([]);
+  const [soarExecutions, setSoarExecutions] = useState<SoarPlaybookExecution[]>([]);
+  const [soarConnectors, setSoarConnectors] = useState<SoarConnectorInfo[]>([]);
+  const [soarAuditLogs, setSoarAuditLogs] = useState<SoarAuditLog[]>([]);
+  const [socMetrics, setSocMetrics] = useState<SocMetrics | null>(null);
+  const [correlationsLoading, setCorrelationsLoading] = useState<boolean>(false);
+  const [soarLoading, setSoarLoading] = useState<boolean>(false);
 
   const [activeAlertId, setActiveAlertId] = useState<string | null>(null);
   const [activeIncidentId, setActiveIncidentId] = useState<string | null>(null);
@@ -310,6 +373,138 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return res.data;
   };
 
+  // Phase 6 & 7 Data Loaders
+  const loadDetectionStrategies = useCallback(async () => {
+    try {
+      const strategies = await apiGetDetectionStrategies();
+      setDetectionStrategies(strategies);
+    } catch (err) {
+      console.warn("Failed to load detection strategies:", err);
+    }
+  }, []);
+
+  const loadCorrelations = useCallback(async (filters?: { strategyId?: string; severity?: string; incidentId?: string; search?: string }) => {
+    setCorrelationsLoading(true);
+    setCorrelationsError(null);
+    try {
+      const res = await apiGetCorrelations(filters);
+      setCorrelations(res.correlations);
+    } catch (err: any) {
+      setCorrelationsError(err.message || "Failed to load correlations");
+    } finally {
+      setCorrelationsLoading(false);
+    }
+  }, []);
+
+  const triggerCorrelationsRun = async (options?: { windowSeconds?: number; strategyIds?: string[]; incidentId?: string }) => {
+    setCorrelationsLoading(true);
+    try {
+      const res = await apiRunCorrelations(options);
+      await loadCorrelations();
+      return {
+        correlations: res.correlations,
+        explanations: res.explanations
+      };
+    } finally {
+      setCorrelationsLoading(false);
+    }
+  };
+
+  const loadSoarConnectors = useCallback(async () => {
+    try {
+      const connectors = await apiGetSoarConnectors();
+      setSoarConnectors(connectors);
+    } catch (err) {
+      console.warn("Failed to load SOAR connectors:", err);
+    }
+  }, []);
+
+  const loadPlaybooks = useCallback(async (status?: string) => {
+    setSoarLoading(true);
+    setSoarError(null);
+    try {
+      const playbooks = await apiGetPlaybooks(status);
+      setSoarPlaybooks(playbooks);
+    } catch (err: any) {
+      setSoarError(err.message || "Failed to load playbooks");
+    } finally {
+      setSoarLoading(false);
+    }
+  }, []);
+
+  const loadPlaybookExecutions = useCallback(async (filters?: { playbookId?: string; status?: string; incidentId?: string }) => {
+    try {
+      const res = await apiGetPlaybookExecutions(filters);
+      setSoarExecutions(res.executions);
+    } catch (err) {
+      console.warn("Failed to load playbook executions:", err);
+    }
+  }, []);
+
+  const loadSoarAuditLogs = useCallback(async (filters?: { executionId?: string; incidentId?: string }) => {
+    try {
+      const logs = await apiGetSoarAuditLogs(filters);
+      setSoarAuditLogs(logs);
+    } catch (err) {
+      console.warn("Failed to load SOAR audit logs:", err);
+    }
+  }, []);
+
+  const loadSocMetrics = useCallback(async () => {
+    try {
+      const metrics = await apiGetSocMetrics();
+      setSocMetrics(metrics);
+    } catch (err) {
+      console.warn("Failed to load SOC metrics:", err);
+    }
+  }, []);
+
+  const runBenchmarkSuite = async (): Promise<BenchmarkResult> => {
+    return await apiRunBenchmark();
+  };
+
+  const executePlaybook = async (
+    playbookId: string,
+    options: { initiatingUser: string; incidentId?: string; alertId?: string; autoApprove?: boolean }
+  ): Promise<SoarPlaybookExecution> => {
+    const execution = await apiRunPlaybook(playbookId, options);
+    await Promise.all([
+      loadPlaybookExecutions(),
+      loadSoarAuditLogs(),
+      loadDashboardStats(),
+      options.incidentId ? loadIncidentActions(options.incidentId) : Promise.resolve()
+    ]);
+    return execution;
+  };
+
+  const approveExecution = async (executionId: string, approvedBy: string): Promise<SoarPlaybookExecution> => {
+    const execution = await apiApprovePlaybookExecution(executionId, approvedBy);
+    await Promise.all([
+      loadPlaybookExecutions(),
+      loadSoarAuditLogs(),
+      loadDashboardStats()
+    ]);
+    return execution;
+  };
+
+  const rejectExecution = async (executionId: string, actor: string, reason: string): Promise<SoarPlaybookExecution> => {
+    const execution = await apiRejectPlaybookExecution(executionId, actor, reason);
+    await Promise.all([
+      loadPlaybookExecutions(),
+      loadSoarAuditLogs()
+    ]);
+    return execution;
+  };
+
+  const cancelExecution = async (executionId: string, actor: string, reason?: string): Promise<SoarPlaybookExecution> => {
+    const execution = await apiCancelPlaybookExecution(executionId, actor, reason);
+    await Promise.all([
+      loadPlaybookExecutions(),
+      loadSoarAuditLogs()
+    ]);
+    return execution;
+  };
+
   // Sync incident actions whenever activeIncidentId changes
   useEffect(() => {
     if (activeIncidentId) {
@@ -383,6 +578,13 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             loadLogs({ limit: 100 }),
             loadReports(),
             loadIncidents(),
+            loadDetectionStrategies(),
+            loadCorrelations(),
+            loadSoarConnectors(),
+            loadPlaybooks(),
+            loadPlaybookExecutions(),
+            loadSoarAuditLogs(),
+            loadSocMetrics()
           ]);
         } else {
           // Fresh database: seed default demo scenario into SQLite persistence
@@ -390,6 +592,13 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           await Promise.all([
             loadReports(),
             loadIncidents(),
+            loadDetectionStrategies(),
+            loadCorrelations(),
+            loadSoarConnectors(),
+            loadPlaybooks(),
+            loadPlaybookExecutions(),
+            loadSoarAuditLogs(),
+            loadSocMetrics()
           ]);
         }
       } catch (err) {
@@ -399,7 +608,20 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     initData();
-  }, [loadDashboardStats, loadLogs, loadReports, loadIncidents, loadScenario]);
+  }, [
+    loadDashboardStats,
+    loadLogs,
+    loadReports,
+    loadIncidents,
+    loadScenario,
+    loadDetectionStrategies,
+    loadCorrelations,
+    loadSoarConnectors,
+    loadPlaybooks,
+    loadPlaybookExecutions,
+    loadSoarAuditLogs,
+    loadSocMetrics
+  ]);
 
   const activeAlert = useMemo(() => {
     if (!activeAlertId) return alerts[0] || null;
@@ -663,6 +885,13 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         incidents,
         incidentActions,
         dashboardStats,
+        detectionStrategies,
+        correlations,
+        soarPlaybooks,
+        soarExecutions,
+        soarConnectors,
+        soarAuditLogs,
+        socMetrics,
         statsLoading,
         alertsLoading,
         logsLoading,
@@ -670,6 +899,8 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         incidentsLoading,
         actionsLoading,
         iocsLoading,
+        correlationsLoading,
+        soarLoading,
         isIngesting,
         statsError,
         alertsError,
@@ -678,6 +909,8 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         incidentsError,
         actionsError,
         iocsError,
+        correlationsError,
+        soarError,
         activeAlertId,
         setActiveAlertId,
         activeAlert,
@@ -695,6 +928,19 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loadIncidents,
         loadIncidentActions,
         loadIocs,
+        loadDetectionStrategies,
+        loadCorrelations,
+        triggerCorrelationsRun,
+        loadSoarConnectors,
+        loadPlaybooks,
+        loadPlaybookExecutions,
+        loadSoarAuditLogs,
+        loadSocMetrics,
+        runBenchmarkSuite,
+        executePlaybook,
+        approveExecution,
+        rejectExecution,
+        cancelExecution,
         loadScenario,
         ingestLogs,
         triggerAlertInvestigation,
