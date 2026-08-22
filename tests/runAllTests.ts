@@ -13,7 +13,8 @@ const tests = [
   "tests/integration/phase3Persistence.test.ts",
   "tests/integration/phase4Foundation.test.ts",
   "tests/integration/phase4IncidentWorkspace.test.ts",
-  "tests/integration/phase4Containment.test.ts"
+  "tests/integration/phase4Containment.test.ts",
+  "tests/integration/phase5IntelligenceReporting.test.ts"
 ];
 
 let totalPassed = 0;

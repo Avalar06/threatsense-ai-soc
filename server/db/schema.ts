@@ -74,7 +74,9 @@ CREATE TABLE IF NOT EXISTS incidents (
   containment_actions TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  closed_at TEXT
+  closed_at TEXT,
+  closed_by TEXT,
+  closure_summary TEXT
 );
 
 -- Incident Reports Table
@@ -104,6 +106,26 @@ CREATE TABLE IF NOT EXISTS ioc_records (
   first_seen TEXT NOT NULL,
   last_seen TEXT,
   tags TEXT
+);
+
+-- IOC Enrichments (Threat Intelligence Observations & External Enrichment) Table
+CREATE TABLE IF NOT EXISTS ioc_enrichments (
+  id TEXT PRIMARY KEY,
+  ioc_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  reputation TEXT NOT NULL DEFAULT 'UNKNOWN',
+  threat_level TEXT NOT NULL DEFAULT 'UNKNOWN',
+  confidence INTEGER DEFAULT 0,
+  classification TEXT,
+  first_seen TEXT,
+  last_seen TEXT,
+  enriched_at TEXT NOT NULL,
+  source TEXT,
+  summary TEXT,
+  metadata TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (ioc_id) REFERENCES ioc_records(id) ON DELETE CASCADE
 );
 
 -- Incident Response Actions (Containment & Remediation Tracking) Table
@@ -151,6 +173,10 @@ CREATE INDEX IF NOT EXISTS idx_iocs_type ON ioc_records(type);
 CREATE INDEX IF NOT EXISTS idx_iocs_value ON ioc_records(value);
 CREATE INDEX IF NOT EXISTS idx_iocs_threat_level ON ioc_records(threat_level);
 
+CREATE INDEX IF NOT EXISTS idx_enrichments_ioc_id ON ioc_enrichments(ioc_id);
+CREATE INDEX IF NOT EXISTS idx_enrichments_provider ON ioc_enrichments(provider);
+CREATE INDEX IF NOT EXISTS idx_enrichments_enriched_at ON ioc_enrichments(enriched_at);
+
 CREATE INDEX IF NOT EXISTS idx_actions_incident_id ON incident_response_actions(incident_id);
 CREATE INDEX IF NOT EXISTS idx_actions_status ON incident_response_actions(status);
 CREATE INDEX IF NOT EXISTS idx_actions_action_type ON incident_response_actions(action_type);
@@ -163,6 +189,7 @@ export const REQUIRED_TABLES = [
   "incidents",
   "incident_reports",
   "ioc_records",
+  "ioc_enrichments",
   "incident_response_actions"
 ] as const;
 
@@ -185,6 +212,9 @@ export const REQUIRED_INDEXES = [
   "idx_iocs_type",
   "idx_iocs_value",
   "idx_iocs_threat_level",
+  "idx_enrichments_ioc_id",
+  "idx_enrichments_provider",
+  "idx_enrichments_enriched_at",
   "idx_actions_incident_id",
   "idx_actions_status",
   "idx_actions_action_type",

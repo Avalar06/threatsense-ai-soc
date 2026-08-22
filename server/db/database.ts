@@ -38,6 +38,24 @@ export interface IncidentResponseActionRecord {
   updatedAt: string;
 }
 
+export interface IocEnrichmentRecord {
+  id: string;
+  iocId: string;
+  provider: string;
+  reputation: "UNKNOWN" | "MALICIOUS" | "SUSPICIOUS" | "BENIGN";
+  threatLevel: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
+  confidence: number;
+  classification?: string;
+  firstSeen?: string;
+  lastSeen?: string;
+  enrichedAt: string;
+  source?: string;
+  summary: string;
+  metadata?: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface IncidentRecord {
   id: string;
   title: string;
@@ -51,6 +69,8 @@ export interface IncidentRecord {
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
+  closedBy?: string;
+  closureSummary?: string;
 }
 
 export const DEFAULT_DB_PATH =
@@ -87,6 +107,16 @@ export interface IncidentFilters {
   priority?: string;
   leadAnalyst?: string;
   search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface IocFilters {
+  type?: string;
+  threatLevel?: string;
+  search?: string;
+  alertId?: string;
+  incidentId?: string;
   limit?: number;
   offset?: number;
 }
@@ -514,11 +544,11 @@ export class SocDatabase {
       INSERT INTO incidents (
         id, title, severity, status, priority, lead_analyst,
         alert_ids, executive_summary, containment_actions,
-        created_at, updated_at, closed_at
+        created_at, updated_at, closed_at, closed_by, closure_summary
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?,
-        ?, ?, ?
+        ?, ?, ?, ?, ?
       )
     `);
 
@@ -534,7 +564,9 @@ export class SocDatabase {
       safeJsonStringify(incident.containmentActions ?? []),
       incident.createdAt,
       incident.updatedAt,
-      incident.closedAt ?? null
+      incident.closedAt ?? null,
+      incident.closedBy ?? null,
+      incident.closureSummary ?? null
     );
   }
 
@@ -627,7 +659,9 @@ export class SocDatabase {
         executive_summary = ?,
         containment_actions = ?,
         updated_at = ?,
-        closed_at = ?
+        closed_at = ?,
+        closed_by = ?,
+        closure_summary = ?
       WHERE id = ?
     `);
 
@@ -642,6 +676,8 @@ export class SocDatabase {
       safeJsonStringify(merged.containmentActions ?? []),
       merged.updatedAt,
       merged.closedAt ?? null,
+      merged.closedBy ?? null,
+      merged.closureSummary ?? null,
       id
     );
     return true;
@@ -914,7 +950,7 @@ export class SocDatabase {
   }
 
   // ------------------------------------------
-  // IOC RECORDS REPOSITORY
+  // IOC RECORDS & ENRICHMENTS REPOSITORY
   // ------------------------------------------
 
   insertIoc(ioc: IOC): void {
@@ -939,15 +975,192 @@ export class SocDatabase {
       ioc.sourceEventId ?? null,
       ioc.confidence ?? 0,
       ioc.firstSeen || now,
-      now,
+      ioc.lastSeen || now,
       safeJsonStringify(ioc.tags ?? [])
     );
+  }
+
+  getIocById(id: string): IOC | null {
+    const stmt = this.db.prepare("SELECT * FROM ioc_records WHERE id = ?");
+    const row = stmt.get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToIoc(row);
+  }
+
+  getIocByValue(value: string): IOC | null {
+    const stmt = this.db.prepare("SELECT * FROM ioc_records WHERE value = ?");
+    const row = stmt.get(value) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToIoc(row);
   }
 
   getAllIocs(): IOC[] {
     const stmt = this.db.prepare("SELECT * FROM ioc_records ORDER BY first_seen DESC");
     const rows = stmt.all() as Record<string, unknown>[];
     return rows.map((r) => this.mapRowToIoc(r));
+  }
+
+  listIocs(filters: IocFilters = {}): {
+    iocs: (IOC & { latestEnrichment?: IocEnrichmentRecord | null; relatedAlertCount?: number; relatedIncidentCount?: number })[];
+    total: number;
+    limit: number;
+    offset: number;
+  } {
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (filters.type) {
+      conditions.push("UPPER(type) = UPPER(?)");
+      params.push(filters.type);
+    }
+    if (filters.threatLevel) {
+      conditions.push("UPPER(threat_level) = UPPER(?)");
+      params.push(filters.threatLevel);
+    }
+    if (filters.search && filters.search.trim()) {
+      const term = `%${filters.search.trim()}%`;
+      conditions.push("(value LIKE ? OR defanged_value LIKE ? OR context LIKE ? OR id LIKE ?)");
+      params.push(term, term, term, term);
+    }
+
+    const whereClause = conditions.length > 0 ? " WHERE " + conditions.join(" AND ") : "";
+
+    const countStmt = this.db.prepare(`SELECT COUNT(*) as count FROM ioc_records${whereClause}`);
+    const countRow = countStmt.get(...params) as { count: number } | undefined;
+    const total = Number(countRow?.count || 0);
+
+    const limit = Math.min(Math.max(Number(filters.limit) || 50, 1), 200);
+    const offset = Math.max(Number(filters.offset) || 0, 0);
+
+    const queryStmt = this.db.prepare(
+      `SELECT * FROM ioc_records${whereClause} ORDER BY first_seen DESC LIMIT ? OFFSET ?`
+    );
+    const rows = queryStmt.all(...params, limit, offset) as Record<string, unknown>[];
+
+    const iocs = rows.map((r) => {
+      const ioc = this.mapRowToIoc(r);
+      const latestEnrichment = this.getLatestEnrichmentByIocId(ioc.id);
+      
+      // Calculate related alert and incident counts
+      const alertMatches = this.db.prepare(`
+        SELECT COUNT(*) as c FROM alerts 
+        WHERE source_ip = ? OR destination_ip = ? OR host = ? OR evidence LIKE ?
+      `).get(ioc.value, ioc.value, ioc.value, `%${ioc.value}%`) as { c: number } | undefined;
+
+      return {
+        ...ioc,
+        latestEnrichment,
+        relatedAlertCount: Number(alertMatches?.c || 0),
+        relatedIncidentCount: 0,
+      };
+    });
+
+    return {
+      iocs,
+      total,
+      limit,
+      offset,
+    };
+  }
+
+  insertIocEnrichment(enrichment: IocEnrichmentRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO ioc_enrichments (
+        id, ioc_id, provider, reputation, threat_level,
+        confidence, classification, first_seen, last_seen,
+        enriched_at, source, summary, metadata, created_at, updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?
+      )
+    `);
+
+    stmt.run(
+      enrichment.id,
+      enrichment.iocId,
+      enrichment.provider,
+      enrichment.reputation,
+      enrichment.threatLevel,
+      enrichment.confidence,
+      enrichment.classification ?? null,
+      enrichment.firstSeen ?? null,
+      enrichment.lastSeen ?? null,
+      enrichment.enrichedAt,
+      enrichment.source ?? null,
+      enrichment.summary,
+      safeJsonStringify(enrichment.metadata ?? null),
+      enrichment.createdAt,
+      enrichment.updatedAt
+    );
+  }
+
+  getEnrichmentsByIocId(iocId: string): IocEnrichmentRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM ioc_enrichments 
+      WHERE ioc_id = ? 
+      ORDER BY enriched_at DESC, created_at DESC
+    `);
+    const rows = stmt.all(iocId) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRowToIocEnrichment(r));
+  }
+
+  getLatestEnrichmentByIocId(iocId: string, provider?: string): IocEnrichmentRecord | null {
+    if (provider) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM ioc_enrichments 
+        WHERE ioc_id = ? AND provider = ? 
+        ORDER BY enriched_at DESC LIMIT 1
+      `);
+      const row = stmt.get(iocId, provider) as Record<string, unknown> | undefined;
+      if (!row) return null;
+      return this.mapRowToIocEnrichment(row);
+    }
+    const stmt = this.db.prepare(`
+      SELECT * FROM ioc_enrichments 
+      WHERE ioc_id = ? 
+      ORDER BY enriched_at DESC LIMIT 1
+    `);
+    const row = stmt.get(iocId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapRowToIocEnrichment(row);
+  }
+
+  getIocsByAlertId(alertId: string): IOC[] {
+    const alert = this.getAlertById(alertId);
+    if (!alert) return [];
+
+    const eventIds = alert.relatedEventIds || [];
+    const ipValues = [alert.sourceIp, alert.destinationIp].filter(Boolean) as string[];
+
+    const placeholders = eventIds.map(() => "?").join(",");
+    let query = "SELECT * FROM ioc_records WHERE value IN (?, ?)";
+    const params: any[] = [alert.sourceIp, alert.destinationIp || ""];
+
+    if (eventIds.length > 0) {
+      query += ` OR source_event_id IN (${placeholders})`;
+      params.push(...eventIds);
+    }
+
+    const stmt = this.db.prepare(query);
+    const rows = stmt.all(...params) as Record<string, unknown>[];
+    return rows.map((r) => this.mapRowToIoc(r));
+  }
+
+  getIocsByIncidentId(incidentId: string): IOC[] {
+    const incident = this.getIncidentById(incidentId);
+    if (!incident || !incident.alertIds || incident.alertIds.length === 0) {
+      return [];
+    }
+
+    const allIocsMap = new Map<string, IOC>();
+    for (const alertId of incident.alertIds) {
+      const alertIocs = this.getIocsByAlertId(alertId);
+      for (const ioc of alertIocs) {
+        allIocsMap.set(ioc.id, ioc);
+      }
+    }
+    return Array.from(allIocsMap.values());
   }
 
   // ------------------------------------------
@@ -1019,7 +1232,9 @@ export class SocDatabase {
       containmentActions: safeJsonParse<string[]>(r.containment_actions as string, []),
       createdAt: String(r.created_at),
       updatedAt: String(r.updated_at),
-      closedAt: r.closed_at ? String(r.closed_at) : undefined
+      closedAt: r.closed_at ? String(r.closed_at) : undefined,
+      closedBy: r.closed_by ? String(r.closed_by) : undefined,
+      closureSummary: r.closure_summary ? String(r.closure_summary) : undefined
     };
   }
 
@@ -1034,7 +1249,28 @@ export class SocDatabase {
       sourceEventId: r.source_event_id ? String(r.source_event_id) : undefined,
       confidence: Number(r.confidence || 0),
       firstSeen: String(r.first_seen),
+      lastSeen: r.last_seen ? String(r.last_seen) : undefined,
       tags: safeJsonParse<string[]>(r.tags as string, [])
+    };
+  }
+
+  private mapRowToIocEnrichment(r: Record<string, unknown>): IocEnrichmentRecord {
+    return {
+      id: String(r.id),
+      iocId: String(r.ioc_id),
+      provider: String(r.provider),
+      reputation: (String(r.reputation) as IocEnrichmentRecord["reputation"]) || "UNKNOWN",
+      threatLevel: (String(r.threat_level) as IocEnrichmentRecord["threatLevel"]) || "UNKNOWN",
+      confidence: Number(r.confidence || 0),
+      classification: r.classification ? String(r.classification) : undefined,
+      firstSeen: r.first_seen ? String(r.first_seen) : undefined,
+      lastSeen: r.last_seen ? String(r.last_seen) : undefined,
+      enrichedAt: String(r.enriched_at),
+      source: r.source ? String(r.source) : undefined,
+      summary: String(r.summary || ""),
+      metadata: safeJsonParse<Record<string, unknown> | null>(r.metadata as string, null),
+      createdAt: String(r.created_at),
+      updatedAt: String(r.updated_at)
     };
   }
 

@@ -8,6 +8,7 @@ import {
   IncidentReport,
   IncidentResponseAction,
   IOC,
+  IocEnrichment,
   SecurityEvent,
   Severity,
   TimelineEvent,
@@ -28,13 +29,19 @@ import {
   createReport as apiCreateReport,
   createIncident as apiCreateIncident,
   updateIncident as apiUpdateIncident,
+  closeIncident as apiCloseIncident,
+  generateIncidentReportFromIncident as apiGenerateIncidentReportFromIncident,
+  getIncidentTimeline as apiGetIncidentTimeline,
   getIncidentActions as apiGetIncidentActions,
   createIncidentAction as apiCreateIncidentAction,
   updateIncidentAction as apiUpdateIncidentAction,
+  getIocs as apiGetIocs,
+  enrichIoc as apiEnrichIoc,
   AlertFilterParams,
   LogFilterParams,
   ReportFilterParams,
   IncidentFilterParams,
+  IocFilterParams,
   ApiError,
 } from "../services/apiClient.js";
 
@@ -69,6 +76,7 @@ interface SocContextType {
   reportsLoading: boolean;
   incidentsLoading: boolean;
   actionsLoading: boolean;
+  iocsLoading: boolean;
   isIngesting: boolean;
   statsError: string | null;
   alertsError: string | null;
@@ -76,6 +84,7 @@ interface SocContextType {
   reportsError: string | null;
   incidentsError: string | null;
   actionsError: string | null;
+  iocsError: string | null;
 
   activeAlertId: string | null;
   setActiveAlertId: (id: string | null) => void;
@@ -95,6 +104,7 @@ interface SocContextType {
   loadReports: (filters?: ReportFilterParams) => Promise<void>;
   loadIncidents: (filters?: IncidentFilterParams) => Promise<void>;
   loadIncidentActions: (incidentId: string) => Promise<void>;
+  loadIocs: (filters?: IocFilterParams) => Promise<void>;
   loadScenario: (scenarioId: string) => Promise<void>;
   ingestLogs: (rawLogText: string, defaultHost?: string) => Promise<{ eventsIngested: number; alertsGenerated: number }>;
   triggerAlertInvestigation: (alertId: string, customNotes?: string) => Promise<GeminiInvestigationResult | null>;
@@ -104,8 +114,12 @@ interface SocContextType {
   saveIncidentReport: (report: IncidentReport) => Promise<void>;
   createIncidentRecord: (incident: Partial<Incident>) => Promise<Incident>;
   updateIncidentRecord: (id: string, updates: Partial<Incident>) => Promise<Incident>;
+  closeIncidentCase: (incidentId: string, params: { closedBy: string; closureSummary: string }) => Promise<Incident>;
+  generateReportForIncident: (incidentId: string, options?: Partial<IncidentReport>) => Promise<IncidentReport>;
+  loadIncidentTimeline: (incidentId: string) => Promise<TimelineEvent[]>;
   createIncidentAction: (incidentId: string, action: Partial<IncidentResponseAction>) => Promise<IncidentResponseAction>;
   updateIncidentAction: (incidentId: string, actionId: string, updates: Partial<IncidentResponseAction>) => Promise<IncidentResponseAction>;
+  enrichIocRecord: (iocId: string, forceRefresh?: boolean) => Promise<IocEnrichment>;
   resetToDefaultDemo: () => Promise<void>;
   clearAllData: () => void;
   openInvestigationForAlert: (alertId: string) => void;
@@ -131,6 +145,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [reportsLoading, setReportsLoading] = useState<boolean>(false);
   const [incidentsLoading, setIncidentsLoading] = useState<boolean>(false);
   const [actionsLoading, setActionsLoading] = useState<boolean>(false);
+  const [iocsLoading, setIocsLoading] = useState<boolean>(false);
   const [isIngesting, setIsIngesting] = useState<boolean>(false);
 
   const [statsError, setStatsError] = useState<string | null>(null);
@@ -139,6 +154,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [reportsError, setReportsError] = useState<string | null>(null);
   const [incidentsError, setIncidentsError] = useState<string | null>(null);
   const [actionsError, setActionsError] = useState<string | null>(null);
+  const [iocsError, setIocsError] = useState<string | null>(null);
 
   const [activeAlertId, setActiveAlertId] = useState<string | null>(null);
   const [activeIncidentId, setActiveIncidentId] = useState<string | null>(null);
@@ -178,6 +194,19 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setAlertsError(err.message || "Failed to load alerts");
     } finally {
       setAlertsLoading(false);
+    }
+  }, []);
+
+  const loadIocs = useCallback(async (filters?: IocFilterParams) => {
+    setIocsLoading(true);
+    setIocsError(null);
+    try {
+      const res = await apiGetIocs(filters);
+      setIocs(res.iocs);
+    } catch (err: any) {
+      setIocsError(err.message || "Failed to load IOCs");
+    } finally {
+      setIocsLoading(false);
     }
   }, []);
 
@@ -243,6 +272,43 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setActionsLoading(false);
     }
   }, []);
+
+  const loadIncidentTimeline = useCallback(async (incidentId: string): Promise<TimelineEvent[]> => {
+    if (!incidentId) return [];
+    try {
+      return await apiGetIncidentTimeline(incidentId);
+    } catch (err) {
+      console.warn("Failed to load incident timeline:", err);
+      return [];
+    }
+  }, []);
+
+  const closeIncidentCase = async (
+    incidentId: string,
+    params: { closedBy: string; closureSummary: string }
+  ): Promise<Incident> => {
+    const updated = await apiCloseIncident(incidentId, params);
+    setIncidents((prev) => prev.map((inc) => (inc.id === incidentId ? { ...inc, ...updated } : inc)));
+    await loadDashboardStats();
+    return updated;
+  };
+
+  const generateReportForIncident = async (
+    incidentId: string,
+    options?: Partial<IncidentReport>
+  ): Promise<IncidentReport> => {
+    const report = await apiGenerateIncidentReportFromIncident(incidentId, options);
+    setIncidentReports((prev) => [report, ...prev.filter((r) => r.id !== report.id)]);
+    await loadReports();
+    return report;
+  };
+
+  const enrichIocRecord = async (iocId: string, forceRefresh?: boolean): Promise<IocEnrichment> => {
+    const res = await apiEnrichIoc(iocId, forceRefresh);
+    // Refresh IOC list
+    await loadIocs();
+    return res.data;
+  };
 
   // Sync incident actions whenever activeIncidentId changes
   useEffect(() => {
@@ -603,6 +669,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         reportsLoading,
         incidentsLoading,
         actionsLoading,
+        iocsLoading,
         isIngesting,
         statsError,
         alertsError,
@@ -610,6 +677,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         reportsError,
         incidentsError,
         actionsError,
+        iocsError,
         activeAlertId,
         setActiveAlertId,
         activeAlert,
@@ -626,6 +694,7 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loadReports,
         loadIncidents,
         loadIncidentActions,
+        loadIocs,
         loadScenario,
         ingestLogs,
         triggerAlertInvestigation,
@@ -635,8 +704,12 @@ export const SocProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         saveIncidentReport,
         createIncidentRecord,
         updateIncidentRecord,
+        closeIncidentCase,
+        generateReportForIncident,
+        loadIncidentTimeline,
         createIncidentAction,
         updateIncidentAction,
+        enrichIocRecord,
         resetToDefaultDemo,
         clearAllData,
         openInvestigationForAlert,

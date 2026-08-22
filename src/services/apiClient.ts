@@ -10,6 +10,7 @@ import {
   SecurityEvent,
   TimelineEvent,
   IOC,
+  IocEnrichment,
   MitreTechnique,
 } from "../types/soc.js";
 
@@ -265,6 +266,39 @@ export async function updateIncident(id: string, updates: Partial<Incident>): Pr
   return handleApiResponse<Incident>(res);
 }
 
+export async function closeIncident(
+  id: string,
+  params: { closedBy: string; closureSummary: string }
+): Promise<Incident> {
+  const res = await fetch(`/api/incidents/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      status: "CLOSED",
+      closedBy: params.closedBy,
+      closureSummary: params.closureSummary,
+    }),
+  });
+  return handleApiResponse<Incident>(res);
+}
+
+export async function getIncidentTimeline(incidentId: string): Promise<TimelineEvent[]> {
+  const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/timeline`);
+  return handleApiResponse<TimelineEvent[]>(res);
+}
+
+export async function generateIncidentReportFromIncident(
+  incidentId: string,
+  options?: Partial<IncidentReport>
+): Promise<IncidentReport> {
+  const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/generate-report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(options || {}),
+  });
+  return handleApiResponse<IncidentReport>(res);
+}
+
 // ----------------------------------------------------
 // 5B. INCIDENT RESPONSE ACTIONS API (SIMULATED / TRACKING)
 // ----------------------------------------------------
@@ -344,6 +378,91 @@ export async function createReport(report: Partial<IncidentReport>): Promise<Inc
     body: JSON.stringify(report),
   });
   return handleApiResponse<IncidentReport>(res);
+}
+
+// ----------------------------------------------------
+// 7. THREAT INTELLIGENCE & IOCS API
+// ----------------------------------------------------
+export interface IocFilterParams {
+  type?: string;
+  threatLevel?: string;
+  search?: string;
+  alertId?: string;
+  incidentId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function getIocs(
+  filters?: IocFilterParams
+): Promise<{ iocs: IOC[]; total: number; limit: number; offset: number }> {
+  const query = new URLSearchParams();
+  if (filters) {
+    if (filters.type) query.set("type", filters.type);
+    if (filters.threatLevel) query.set("threatLevel", filters.threatLevel);
+    if (filters.search) query.set("search", filters.search);
+    if (filters.alertId) query.set("alertId", filters.alertId);
+    if (filters.incidentId) query.set("incidentId", filters.incidentId);
+    if (filters.limit) query.set("limit", String(filters.limit));
+    if (filters.offset) query.set("offset", String(filters.offset));
+  }
+
+  const url = `/api/iocs${query.toString() ? `?${query.toString()}` : ""}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed to fetch IOC records", json.error?.code, res.status);
+  }
+
+  return {
+    iocs: json.data || [],
+    total: json.pagination?.total ?? (json.data?.length || 0),
+    limit: json.pagination?.limit ?? (filters?.limit || 50),
+    offset: json.pagination?.offset ?? (filters?.offset || 0),
+  };
+}
+
+export async function getIoc(id: string): Promise<IOC & {
+  enrichments: IocEnrichment[];
+  latestEnrichment?: IocEnrichment;
+  relatedAlerts: Alert[];
+  relatedIncidents: Incident[];
+}> {
+  const res = await fetch(`/api/iocs/${encodeURIComponent(id)}`);
+  return handleApiResponse<IOC & {
+    enrichments: IocEnrichment[];
+    latestEnrichment?: IocEnrichment;
+    relatedAlerts: Alert[];
+    relatedIncidents: Incident[];
+  }>(res);
+}
+
+export async function createIoc(ioc: Partial<IOC>): Promise<IOC> {
+  const res = await fetch("/api/iocs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(ioc),
+  });
+  return handleApiResponse<IOC>(res);
+}
+
+export async function enrichIoc(
+  id: string,
+  forceRefresh?: boolean
+): Promise<{ data: IocEnrichment; status: string }> {
+  const res = await fetch(`/api/iocs/${encodeURIComponent(id)}/enrich`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ forceRefresh: Boolean(forceRefresh) }),
+  });
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new ApiError(json.error?.message || "Failed to enrich IOC", json.error?.code, res.status);
+  }
+  return {
+    data: json.data,
+    status: json.status,
+  };
 }
 
 export async function investigateAlertWithGemini(

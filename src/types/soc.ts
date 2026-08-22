@@ -48,6 +48,25 @@ export interface TimelineEvent {
   tactics?: string[];
 }
 
+export interface IocEnrichment {
+  id: string;
+  iocId: string;
+  provider: string;
+  reputation: "MALICIOUS" | "SUSPICIOUS" | "BENIGN" | "UNKNOWN";
+  threatLevel: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
+  confidence: number; // 0 - 100
+  classification?: string;
+  firstSeen?: string;
+  lastSeen?: string;
+  enrichedAt: string;
+  source?: string;
+  summary: string;
+  metadata?: Record<string, unknown> | null;
+  status?: "ENRICHED" | "NOT_CONFIGURED" | "UNAVAILABLE" | "FAILED";
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface IOC {
   id: string;
   value: string;
@@ -58,7 +77,12 @@ export interface IOC {
   sourceEventId?: string;
   confidence: number; // 0 - 100
   firstSeen?: string;
+  lastSeen?: string;
   tags?: string[];
+  enrichments?: IocEnrichment[];
+  latestEnrichment?: IocEnrichment | null;
+  relatedAlertCount?: number;
+  relatedIncidentCount?: number;
 }
 
 export interface GeminiInvestigationResult {
@@ -259,6 +283,8 @@ export interface Incident {
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
+  closedBy?: string;
+  closureSummary?: string;
   alertIds?: string[];
   executiveSummary?: string;
   containmentActions?: string[];
@@ -267,4 +293,5 @@ export interface Incident {
   scope?: string;
   tags?: string[];
   alerts?: Alert[];
+  reports?: IncidentReport[];
 }

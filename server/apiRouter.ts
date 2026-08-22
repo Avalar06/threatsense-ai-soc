@@ -4,7 +4,20 @@ import { Type } from "@google/genai";
 import { SocDatabase } from "./db/database.js";
 import { parseRawLogs } from "../src/services/logParser.js";
 import { runDetectionEngine } from "../src/services/detectionEngine.js";
-import type { Alert, SecurityEvent, IncidentReport, ResponseActionType, ResponseTargetType, ResponseActionStatus } from "../src/types/soc.js";
+import { enrichmentService } from "./services/iocEnrichmentService.js";
+import type {
+  Alert,
+  SecurityEvent,
+  IncidentReport,
+  ResponseActionType,
+  ResponseTargetType,
+  ResponseActionStatus,
+  IOC,
+  IocEnrichment,
+  TimelineEvent,
+  MitreTechnique,
+  GeminiInvestigationResult,
+} from "../src/types/soc.js";
 import { VALID_ACTION_TARGET_MAP } from "../src/types/soc.js";
 
 export const apiRouter: Router = express.Router();
@@ -22,6 +35,158 @@ export function getSocDatabase(): SocDatabase {
 
 export function setSocDatabase(db: SocDatabase | null) {
   dbInstance = db;
+}
+
+export function buildIncidentTimeline(incidentId: string, db: SocDatabase): TimelineEvent[] {
+  const incident = db.getIncidentById(incidentId);
+  if (!incident) return [];
+
+  const timelineEvents: TimelineEvent[] = [];
+
+  // 1. Incident Creation Milestone
+  timelineEvents.push({
+    id: `TL-INC-CREATE-${incident.id}`,
+    time: incident.createdAt,
+    stage: "INCIDENT_CREATION",
+    title: `Incident Created: ${incident.title}`,
+    description: `Incident created with severity ${incident.severity} and priority ${incident.priority || "P2"}. Lead analyst assigned: ${incident.leadAnalyst || "Unassigned"}.`,
+    severity: (incident.severity as any) || "HIGH",
+  });
+
+  // 2. Linked Alerts and their Security Events
+  const alertIds = incident.alertIds || [];
+  for (const alertId of alertIds) {
+    const alert = db.getAlertById(alertId);
+    if (!alert) continue;
+
+    timelineEvents.push({
+      id: `TL-ALT-${alert.id}`,
+      time: alert.timestamp,
+      stage: "DETECTION_TRIGGERED",
+      title: `Alert Triggered: ${alert.title}`,
+      description: `Rule '${alert.ruleName || alert.ruleId || alert.detectionSource}' triggered on host ${alert.host} (Source IP: ${alert.sourceIp}). Risk score: ${alert.riskScore}/100.`,
+      severity: alert.severity,
+      eventId: alert.id,
+      tactics: (alert.mitreTechniques || []).map((m) => m.tactic),
+    });
+
+    if (alert.geminiAnalysis) {
+      timelineEvents.push({
+        id: `TL-AI-${alert.id}`,
+        time: alert.updatedAt || alert.timestamp,
+        stage: "AI_INVESTIGATION",
+        title: `AI Investigation Verdict: ${alert.geminiAnalysis.verdict}`,
+        description: `Gemini Confidence: ${alert.geminiAnalysis.confidenceScore}%. ${alert.geminiAnalysis.executiveSummary}`,
+        severity: alert.severity,
+      });
+    }
+
+    const events = db.getEventsByAlertId(alert.id);
+    for (const evt of events) {
+      timelineEvents.push({
+        id: `TL-EVT-${evt.id}`,
+        time: evt.timestamp,
+        stage: "TELEMETRY_OBSERVED",
+        title: `Security Event: ${evt.event_type} [${evt.action}]`,
+        description: `${evt.message} (User: ${evt.username}, Host: ${evt.hostname}, Process: ${evt.process || "N/A"})`,
+        severity: evt.severity,
+        eventId: evt.id,
+        rawEvidence: evt.raw,
+      });
+    }
+  }
+
+  // 3. Response Actions
+  const actions = db.getIncidentActionsByIncidentId(incident.id);
+  for (const action of actions) {
+    timelineEvents.push({
+      id: `TL-ACT-REQ-${action.id}`,
+      time: action.requestedAt,
+      stage: "ACTION_REQUESTED",
+      title: `Response Action Requested: ${action.actionType}`,
+      description: `Target: ${action.targetType} [${action.target}] requested by ${action.requestedBy}. Notes: ${action.notes || "None"}`,
+      severity: "MEDIUM",
+    });
+
+    if (action.approvedAt) {
+      timelineEvents.push({
+        id: `TL-ACT-APP-${action.id}`,
+        time: action.approvedAt,
+        stage: "ACTION_APPROVED",
+        title: `Response Action Approved: ${action.actionType}`,
+        description: `Approved by ${action.approvedBy || "SOC Manager"} for target ${action.target}.`,
+        severity: "LOW",
+      });
+    }
+
+    if (action.executedAt) {
+      timelineEvents.push({
+        id: `TL-ACT-EXE-${action.id}`,
+        time: action.executedAt,
+        stage: "ACTION_EXECUTED",
+        title: `Response Action Executed (Simulated): ${action.actionType}`,
+        description: `Status: ${action.status}. Result: ${action.result || "Simulated execution recorded in SOC database."}`,
+        severity: action.status === "FAILED" ? "HIGH" : "INFORMATIONAL",
+      });
+    }
+  }
+
+  // 4. Extracted IOCs & Enrichments
+  const iocs = db.getIocsByIncidentId(incident.id);
+  for (const ioc of iocs) {
+    timelineEvents.push({
+      id: `TL-IOC-${ioc.id}`,
+      time: ioc.firstSeen || incident.createdAt,
+      stage: "IOC_EXTRACTED",
+      title: `IOC Extracted: ${ioc.type}`,
+      description: `Indicator ${ioc.defangedValue || ioc.value} identified in incident telemetry with confidence ${ioc.confidence}%.`,
+      severity: ioc.riskLevel === "MALICIOUS" ? "CRITICAL" : ioc.riskLevel === "SUSPICIOUS" ? "HIGH" : "MEDIUM",
+    });
+
+    const enrichments = db.getEnrichmentsByIocId(ioc.id);
+    for (const enr of enrichments) {
+      timelineEvents.push({
+        id: `TL-ENR-${enr.id}`,
+        time: enr.enrichedAt,
+        stage: "IOC_ENRICHED",
+        title: `Threat Intel: ${enr.provider} (${(enr as any).status || "PROCESSED"})`,
+        description: `Threat Level: ${enr.threatLevel}, Reputation: ${enr.reputation}. ${enr.summary}`,
+        severity: (enr.threatLevel as any) || "INFORMATIONAL",
+      });
+    }
+  }
+
+  // 5. Generated Incident Reports
+  const reports = db.listReports({ incidentId: incident.id }).reports;
+  for (const rpt of reports) {
+    timelineEvents.push({
+      id: `TL-RPT-${rpt.id}`,
+      time: rpt.generatedAt || rpt.createdAt || incident.createdAt,
+      stage: "REPORT_PUBLISHED",
+      title: `Incident Report Published: ${rpt.reportTitle}`,
+      description: `Author: ${rpt.author}. Status: ${rpt.status || "FINAL"}. Classification: ${rpt.classification || "INTERNAL"}`,
+      severity: "INFORMATIONAL",
+    });
+  }
+
+  // 6. Case Closure Milestone (if closed)
+  if (incident.closedAt) {
+    timelineEvents.push({
+      id: `TL-INC-CLOSE-${incident.id}`,
+      time: incident.closedAt,
+      stage: "CASE_CLOSED",
+      title: `Incident Case Closed`,
+      description: `Closed by ${incident.closedBy || "SOC Lead"}. Closure Summary: ${incident.closureSummary || "Incident lifecycle closed successfully."}`,
+      severity: "INFORMATIONAL",
+    });
+  }
+
+  // Sort strictly chronological ascending
+  return timelineEvents.sort((a, b) => {
+    const tA = new Date(a.time).getTime() || 0;
+    const tB = new Date(b.time).getTime() || 0;
+    return tA - tB;
+  });
 }
 
 function sendError(res: Response, status: number, code: string, message: string) {
@@ -1065,7 +1230,7 @@ apiRouter.get("/incidents", (req: Request, res: Response) => {
   }
 });
 
-// GET /api/incidents/:id - Retrieve incident by ID with linked alerts and response actions
+// GET /api/incidents/:id - Retrieve incident by ID with linked alerts, response actions, iocs, and reports
 apiRouter.get("/incidents/:id", (req: Request, res: Response) => {
   try {
     const incident = getSocDatabase().getIncidentById(req.params.id);
@@ -1078,6 +1243,8 @@ apiRouter.get("/incidents/:id", (req: Request, res: Response) => {
       .filter((a): a is Alert => Boolean(a));
 
     const responseActions = getSocDatabase().getIncidentActionsByIncidentId(incident.id);
+    const iocs = getSocDatabase().getIocsByIncidentId(incident.id);
+    const reports = getSocDatabase().listReports({ incidentId: incident.id }).reports;
 
     return res.json({
       success: true,
@@ -1085,10 +1252,187 @@ apiRouter.get("/incidents/:id", (req: Request, res: Response) => {
         ...incident,
         alerts: linkedAlerts,
         responseActions,
+        iocs,
+        reports,
       },
     });
   } catch {
     return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve incident");
+  }
+});
+
+// GET /api/incidents/:id/timeline - Retrieve chronological lifecycle timeline for an incident
+apiRouter.get("/incidents/:id/timeline", (req: Request, res: Response) => {
+  try {
+    const incident = getSocDatabase().getIncidentById(req.params.id);
+    if (!incident) {
+      return sendError(res, 404, "NOT_FOUND", `Incident with ID '${req.params.id}' was not found`);
+    }
+
+    const timeline = buildIncidentTimeline(req.params.id, getSocDatabase());
+    return res.json({
+      success: true,
+      data: timeline,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve incident timeline");
+  }
+});
+
+// POST /api/incidents/:id/generate-report - Generate comprehensive persistent incident report
+apiRouter.post("/incidents/:id/generate-report", (req: Request, res: Response) => {
+  try {
+    const incident = getSocDatabase().getIncidentById(req.params.id);
+    if (!incident) {
+      return sendError(res, 404, "NOT_FOUND", `Incident with ID '${req.params.id}' was not found`);
+    }
+
+    const body = req.body || {};
+    const linkedAlerts = (incident.alertIds || [])
+      .map((alertId) => getSocDatabase().getAlertById(alertId))
+      .filter((a): a is Alert => Boolean(a));
+
+    const responseActions = getSocDatabase().getIncidentActionsByIncidentId(incident.id);
+    const iocs = getSocDatabase().getIocsByIncidentId(incident.id);
+    const timeline = buildIncidentTimeline(incident.id, getSocDatabase());
+
+    // Gather events
+    const allEvents: SecurityEvent[] = [];
+    for (const alert of linkedAlerts) {
+      const evts = getSocDatabase().getEventsByAlertId(alert.id);
+      allEvents.push(...evts);
+    }
+
+    // Determine affected assets and users
+    const affectedAssets = Array.from(
+      new Set(
+        linkedAlerts
+          .map((a) => a.host)
+          .concat(allEvents.map((e) => e.hostname))
+          .filter(Boolean)
+      )
+    );
+
+    const affectedUsers = Array.from(
+      new Set(
+        linkedAlerts
+          .map((a) => a.username)
+          .concat(allEvents.map((e) => e.username))
+          .filter(Boolean)
+      )
+    );
+
+    // Determine MITRE techniques
+    const mitreMap = new Map<string, MitreTechnique>();
+    for (const alert of linkedAlerts) {
+      for (const tech of alert.mitreTechniques || []) {
+        mitreMap.set(tech.id, tech);
+      }
+    }
+    const mitreMappings = Array.from(mitreMap.values());
+
+    // Calculate max risk score
+    const maxRiskScore = linkedAlerts.length > 0
+      ? Math.max(...linkedAlerts.map((a) => a.riskScore || 50))
+      : incident.severity === "CRITICAL"
+      ? 95
+      : incident.severity === "HIGH"
+      ? 80
+      : incident.severity === "MEDIUM"
+      ? 55
+      : 25;
+
+    // Completed containment actions
+    const containmentActionsCompleted = responseActions
+      .filter((a) => a.status === "EXECUTED")
+      .map(
+        (a) =>
+          `[SIMULATED] Executed ${a.actionType} on target ${a.targetType} [${a.target}] (Requested by ${a.requestedBy}, Approved by ${a.approvedBy || "System"}). Result: ${a.result || "Success"}`
+      )
+      .concat(incident.containmentActions || []);
+
+    const now = new Date().toISOString();
+    const reportId = body.id || `RPT-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`;
+
+    const report: IncidentReport = {
+      id: reportId,
+      incidentId: incident.id,
+      reportTitle:
+        body.reportTitle || `SOC Incident Report: ${incident.title} [${incident.id}]`,
+      author:
+        body.author ||
+        incident.leadAnalyst ||
+        "Autonomous AI-SOC Senior Incident Responder",
+      status: (body.status as any) || "FINAL",
+      classification:
+        body.classification ||
+        (incident.severity === "CRITICAL"
+          ? "CRITICAL INCIDENT"
+          : incident.severity === "HIGH"
+          ? "HIGH-SEVERITY INCIDENT"
+          : "SECURITY INCIDENT"),
+      executiveSummary:
+        body.executiveSummary ||
+        incident.executiveSummary ||
+        (linkedAlerts.length > 0
+          ? linkedAlerts.map((a) => a.description || a.title).join("; ")
+          : `Comprehensive incident investigation for case ${incident.id}.`),
+      incidentDescription:
+        body.incidentDescription ||
+        `Investigation into ${incident.title} involving ${linkedAlerts.length} correlated alerts, ${allEvents.length} security telemetry events, and ${iocs.length} identified indicators across ${affectedAssets.length} host assets.`,
+      detectionMethod:
+        body.detectionMethod ||
+        Array.from(new Set(linkedAlerts.map((a) => a.detectionSource || "RULE_BASED"))).join(", ") ||
+        "DETERMINISTIC_SIEM_DETECTION",
+      affectedAssets,
+      affectedUsers,
+      timeline,
+      iocs,
+      evidence: Array.from(new Set(linkedAlerts.flatMap((a) => a.evidence || []))),
+      mitreMappings,
+      riskAssessment: body.riskAssessment || {
+        quantitativeScore: maxRiskScore,
+        impactRating: incident.severity,
+        confidentialityImpact: incident.severity === "CRITICAL" ? "High" : "Medium",
+        integrityImpact: "High",
+        availabilityImpact: "Low",
+      },
+      rootCauseAnalysis:
+        body.rootCauseAnalysis ||
+        (linkedAlerts.length > 0
+          ? `Root cause identified through alert rule '${linkedAlerts[0].ruleName || linkedAlerts[0].ruleId || "SIEM Correlation"}' triggered on host ${linkedAlerts[0].host}.`
+          : "Root cause analysis completed."),
+      containmentActionsCompleted,
+      eradicationAndRemediation:
+        body.eradicationAndRemediation || [
+          "Isolated affected endpoints from enterprise production subnets.",
+          "Revoked active Kerberos and OAuth access tokens for compromised accounts.",
+          "Terminated malicious process trees and quarantined dropped artifacts.",
+          "Enforced perimeter and host-level firewall blocklists for correlated indicators.",
+        ],
+      lessonsLearnedAndPreventativeControls:
+        body.lessonsLearnedAndPreventativeControls || [
+          "Enforce hardware-backed MFA on all exposed administrative access panels.",
+          "Harden EDR script execution blocking rules against PowerShell obfuscation.",
+          "Implement automated credential revocation upon multi-alert correlation.",
+          "Review network egress filtering for anomalous non-standard destination ports.",
+        ],
+      analystConclusion:
+        body.analystConclusion ||
+        (incident.status === "CLOSED"
+          ? `Incident resolved and closed by ${incident.closedBy || "SOC Lead"}. Closure summary: ${incident.closureSummary || "Case resolved."}`
+          : `Incident is in '${incident.status}' state under supervision of ${incident.leadAnalyst || "SOC Team"}.`),
+      createdAt: now,
+      generatedAt: now,
+    };
+
+    getSocDatabase().insertReport(report);
+    return res.status(201).json({
+      success: true,
+      data: report,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to generate incident report");
   }
 });
 
@@ -1149,6 +1493,8 @@ apiRouter.post("/incidents", (req: Request, res: Response) => {
       createdAt: body.createdAt || now,
       updatedAt: body.updatedAt || now,
       closedAt: body.closedAt,
+      closedBy: body.closedBy ? String(body.closedBy).trim() : undefined,
+      closureSummary: body.closureSummary ? String(body.closureSummary).trim() : undefined,
     };
 
     getSocDatabase().insertIncident(incident);
@@ -1161,7 +1507,7 @@ apiRouter.post("/incidents", (req: Request, res: Response) => {
   }
 });
 
-// PATCH /api/incidents/:id - Update incident lifecycle fields with alert validation
+// PATCH /api/incidents/:id - Update incident lifecycle fields with closure validation
 apiRouter.patch("/incidents/:id", (req: Request, res: Response) => {
   try {
     const existing = getSocDatabase().getIncidentById(req.params.id);
@@ -1174,15 +1520,48 @@ apiRouter.patch("/incidents/:id", (req: Request, res: Response) => {
       return sendError(res, 400, "INVALID_REQUEST", "Request body must be a JSON object");
     }
 
+    // Lifecycle enforcement: Closed incidents cannot regress status unless explicitly authorized
+    if (existing.status === "CLOSED" && body.status !== undefined && body.status !== "CLOSED") {
+      return sendError(
+        res,
+        400,
+        "INVALID_LIFECYCLE_TRANSITION",
+        "Incident is in CLOSED status and cannot regress lifecycle"
+      );
+    }
+
     const updates: Partial<typeof existing> = {};
     if (body.title !== undefined) updates.title = String(body.title).trim();
     if (body.severity !== undefined) updates.severity = String(body.severity);
-    if (body.status !== undefined) updates.status = String(body.status);
     if (body.priority !== undefined) updates.priority = String(body.priority);
     if (body.leadAnalyst !== undefined) updates.leadAnalyst = body.leadAnalyst ? String(body.leadAnalyst).trim() : undefined;
     if (body.executiveSummary !== undefined) updates.executiveSummary = String(body.executiveSummary);
     if (Array.isArray(body.containmentActions)) updates.containmentActions = body.containmentActions;
     
+    // Case Closure Handling
+    if (body.status === "CLOSED") {
+      if (!body.closureSummary || typeof body.closureSummary !== "string" || !body.closureSummary.trim()) {
+        return sendError(res, 400, "CLOSURE_SUMMARY_REQUIRED", "closureSummary is required to close an incident");
+      }
+      if (!body.closedBy || typeof body.closedBy !== "string" || !body.closedBy.trim()) {
+        return sendError(res, 400, "CLOSED_BY_REQUIRED", "closedBy analyst name/ID is required to close an incident");
+      }
+
+      updates.status = "CLOSED";
+      updates.closedBy = body.closedBy.trim();
+      updates.closureSummary = body.closureSummary.trim();
+      updates.closedAt = new Date().toISOString(); // Server generated
+    } else if (body.status !== undefined) {
+      updates.status = String(body.status);
+    }
+
+    if (body.closureSummary !== undefined && body.status !== "CLOSED") {
+      updates.closureSummary = String(body.closureSummary).trim();
+    }
+    if (body.closedBy !== undefined && body.status !== "CLOSED") {
+      updates.closedBy = String(body.closedBy).trim();
+    }
+
     if (body.alertIds !== undefined) {
       if (!Array.isArray(body.alertIds)) {
         return sendError(res, 400, "INVALID_REQUEST", "alertIds must be an array of string IDs");
@@ -1198,7 +1577,6 @@ apiRouter.patch("/incidents/:id", (req: Request, res: Response) => {
       updates.alertIds = uniqueIds;
     }
 
-    if (body.closedAt !== undefined) updates.closedAt = String(body.closedAt);
     if (body.updatedAt !== undefined) updates.updatedAt = String(body.updatedAt);
 
     getSocDatabase().updateIncident(req.params.id, updates);
@@ -1449,6 +1827,267 @@ apiRouter.patch("/incidents/:id/actions/:actionId", (req: Request, res: Response
     });
   } catch {
     return sendError(res, 500, "INTERNAL_ERROR", "Failed to update response action");
+  }
+});
+
+// ==========================================
+// 7. THREAT INTELLIGENCE & IOC MANAGEMENT API
+// ==========================================
+
+// Helper to defang an IOC value safely
+function defangIocValue(value: string, type: string): string {
+  if (!value) return "";
+  if (type === "IPV4" || type === "IPV6") {
+    return value.replace(/\./g, "[.]").replace(/:/g, "[:]");
+  }
+  if (type === "DOMAIN" || type === "URL") {
+    return value.replace(/\./g, "[.]").replace(/https:\/\//g, "hxxps://").replace(/http:\/\//g, "hxxp://");
+  }
+  if (type === "EMAIL") {
+    return value.replace(/@/g, "[at]").replace(/\./g, "[.]");
+  }
+  return value;
+}
+
+// GET /api/iocs - List indicators of compromise with filtering & pagination
+apiRouter.get("/iocs", (req: Request, res: Response) => {
+  try {
+    const { type, threatLevel, search, alertId, incidentId, limit, offset } = req.query;
+
+    if (typeof incidentId === "string" && incidentId.trim()) {
+      const incidentIocs = getSocDatabase().getIocsByIncidentId(incidentId.trim());
+      const enrichedIocs = incidentIocs.map((ioc) => ({
+        ...ioc,
+        latestEnrichment: getSocDatabase().getLatestEnrichmentByIocId(ioc.id),
+      }));
+      return res.json({
+        success: true,
+        data: enrichedIocs,
+        pagination: {
+          total: enrichedIocs.length,
+          limit: enrichedIocs.length,
+          offset: 0,
+        },
+      });
+    }
+
+    if (typeof alertId === "string" && alertId.trim()) {
+      const alertIocs = getSocDatabase().getIocsByAlertId(alertId.trim());
+      const enrichedIocs = alertIocs.map((ioc) => ({
+        ...ioc,
+        latestEnrichment: getSocDatabase().getLatestEnrichmentByIocId(ioc.id),
+      }));
+      return res.json({
+        success: true,
+        data: enrichedIocs,
+        pagination: {
+          total: enrichedIocs.length,
+          limit: enrichedIocs.length,
+          offset: 0,
+        },
+      });
+    }
+
+    const result = getSocDatabase().listIocs({
+      type: typeof type === "string" ? type : undefined,
+      threatLevel: typeof threatLevel === "string" ? threatLevel : undefined,
+      search: typeof search === "string" ? search : undefined,
+      limit: limit ? Number(limit) : undefined,
+      offset: offset ? Number(offset) : undefined,
+    });
+
+    return res.json({
+      success: true,
+      data: result.iocs,
+      pagination: {
+        total: result.total,
+        limit: result.limit,
+        offset: result.offset,
+      },
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve IOC records");
+  }
+});
+
+// GET /api/iocs/:id - Retrieve single IOC with enrichments and correlated entities
+apiRouter.get("/iocs/:id", (req: Request, res: Response) => {
+  try {
+    const ioc = getSocDatabase().getIocById(req.params.id);
+    if (!ioc) {
+      return sendError(res, 404, "NOT_FOUND", `IOC with ID '${req.params.id}' was not found`);
+    }
+
+    const enrichments = getSocDatabase().getEnrichmentsByIocId(ioc.id);
+    const latestEnrichment = getSocDatabase().getLatestEnrichmentByIocId(ioc.id);
+
+    // Correlate related alerts
+    const alerts = getSocDatabase().getAllAlerts().filter((a) => {
+      return (
+        a.sourceIp === ioc.value ||
+        a.destinationIp === ioc.value ||
+        a.host === ioc.value ||
+        (a.evidence || []).some((ev) => ev.includes(ioc.value))
+      );
+    });
+
+    // Correlate related incidents
+    const alertIdSet = new Set(alerts.map((a) => a.id));
+    const incidents = getSocDatabase().getAllIncidents().filter((inc) => {
+      return (inc.alertIds || []).some((aId) => alertIdSet.has(aId));
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        ...ioc,
+        enrichments,
+        latestEnrichment,
+        relatedAlerts: alerts,
+        relatedIncidents: incidents,
+      },
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to retrieve IOC details");
+  }
+});
+
+// POST /api/iocs - Register / insert an IOC
+apiRouter.post("/iocs", (req: Request, res: Response) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== "object") {
+      return sendError(res, 400, "INVALID_REQUEST", "Request body must be a JSON object");
+    }
+
+    const { value, type } = body;
+    if (!value || typeof value !== "string" || !value.trim()) {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: value");
+    }
+    if (!type || typeof type !== "string") {
+      return sendError(res, 400, "INVALID_REQUEST", "Missing required field: type");
+    }
+
+    const trimmedValue = value.trim();
+    const id = body.id || `IOC-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`;
+    const defangedValue = body.defangedValue || defangIocValue(trimmedValue, type);
+
+    const ioc: IOC = {
+      id,
+      value: trimmedValue,
+      defangedValue,
+      type: type as IOC["type"],
+      riskLevel: body.riskLevel || "UNKNOWN",
+      context: body.context || "",
+      sourceEventId: body.sourceEventId,
+      confidence: Number(body.confidence || 0),
+      firstSeen: body.firstSeen || new Date().toISOString(),
+      tags: Array.isArray(body.tags) ? body.tags : [],
+    };
+
+    getSocDatabase().insertIoc(ioc);
+    return res.status(201).json({
+      success: true,
+      data: ioc,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to register IOC");
+  }
+});
+
+// POST /api/iocs/:id/enrich - Enrich IOC with threat intelligence (Safe Demo Mode compliant)
+apiRouter.post("/api/iocs/:id/enrich", async (req: Request, res: Response) => {
+  try {
+    const ioc = getSocDatabase().getIocById(req.params.id);
+    if (!ioc) {
+      return sendError(res, 404, "NOT_FOUND", `IOC with ID '${req.params.id}' was not found`);
+    }
+
+    const forceRefresh = Boolean(req.body?.forceRefresh);
+    const existingEnrichment = getSocDatabase().getLatestEnrichmentByIocId(ioc.id);
+
+    const result = await enrichmentService.enrichIoc(
+      ioc,
+      existingEnrichment as any,
+      forceRefresh
+    );
+
+    const now = new Date().toISOString();
+    const enrichmentRecord = {
+      id: `ENR-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`,
+      iocId: ioc.id,
+      provider: result.provider,
+      reputation: result.reputation,
+      threatLevel: result.threatLevel,
+      confidence: result.confidence,
+      classification: result.classification,
+      firstSeen: result.firstSeen,
+      lastSeen: result.lastSeen,
+      enrichedAt: now,
+      source: result.source,
+      summary: result.summary,
+      metadata: result.metadata || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    getSocDatabase().insertIocEnrichment(enrichmentRecord);
+
+    return res.json({
+      success: true,
+      data: enrichmentRecord,
+      status: result.status,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to enrich IOC");
+  }
+});
+
+// Route alias without leading /api if router is mounted on /api
+apiRouter.post("/iocs/:id/enrich", async (req: Request, res: Response) => {
+  try {
+    const ioc = getSocDatabase().getIocById(req.params.id);
+    if (!ioc) {
+      return sendError(res, 404, "NOT_FOUND", `IOC with ID '${req.params.id}' was not found`);
+    }
+
+    const forceRefresh = Boolean(req.body?.forceRefresh);
+    const existingEnrichment = getSocDatabase().getLatestEnrichmentByIocId(ioc.id);
+
+    const result = await enrichmentService.enrichIoc(
+      ioc,
+      existingEnrichment as any,
+      forceRefresh
+    );
+
+    const now = new Date().toISOString();
+    const enrichmentRecord = {
+      id: `ENR-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 1000)}`,
+      iocId: ioc.id,
+      provider: result.provider,
+      reputation: result.reputation,
+      threatLevel: result.threatLevel,
+      confidence: result.confidence,
+      classification: result.classification,
+      firstSeen: result.firstSeen,
+      lastSeen: result.lastSeen,
+      enrichedAt: now,
+      source: result.source,
+      summary: result.summary,
+      metadata: result.metadata || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    getSocDatabase().insertIocEnrichment(enrichmentRecord);
+
+    return res.json({
+      success: true,
+      data: enrichmentRecord,
+      status: result.status,
+    });
+  } catch {
+    return sendError(res, 500, "INTERNAL_ERROR", "Failed to enrich IOC");
   }
 });
 
